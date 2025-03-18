@@ -482,16 +482,14 @@ if __name__ == "__main__":
                     a_opt = torch.nn.Parameter(a0.clone(), requires_grad=True)
 
                     # 2. Precompute value gradient
-                    def get_value_grad(single_obs):
-                        return grad(lambda x: agent.get_value(x.unsqueeze(0)).squeeze())(single_obs)
+                    def value_fn(x):
+                        return agent.get_value(x)
                     
-                    # Vectorize over batch dimension
-                    dVdx = vmap(get_value_grad)(obs_batch)
-                    # Reshape to match original dimensions
-                    dVdx = dVdx.reshape_as(obs_batch)
+                    # Compute gradients using torch.func
+                    dVdx = vmap(grad(value_fn))(obs_batch)
 
                     # 3. Action optimization setup
-                    lr = 0.1  # Fixed learning rate for action updates
+                    lr = 0.1
                     action_low = torch.tensor(envs.single_action_space.low, device=device)
                     action_high = torch.tensor(envs.single_action_space.high, device=device)
                     

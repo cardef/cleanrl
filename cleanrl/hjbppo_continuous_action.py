@@ -270,34 +270,64 @@ if __name__ == "__main__":
         
         # Dynamic model pretraining
         print("Pretraining dynamic model...")
-        for pretrain_epoch in trange(5000):
-            b_obs = obs.reshape(-1, obs_dim)
-            b_actions = actions.reshape(-1, action_dim)
-            b_next_obs = next_observations.reshape(-1, obs_dim)
-            b_dones = dones.reshape(-1)
+        # Prepare data once before training loop
+        b_obs = obs.reshape(-1, obs_dim)
+        b_actions = actions.reshape(-1, action_dim)
+        b_next_obs = next_observations.reshape(-1, obs_dim)
+        b_dones = dones.reshape(-1)
+        
+        mask = b_dones == 0
+        if mask.sum() == 0:
+            print("No valid transitions for pretraining")
+        else:
+            # Split into train/validation (80/20)
+            valid_obs = b_obs[mask]
+            valid_actions = b_actions[mask]
+            valid_next_obs = b_next_obs[mask]
             
-            mask = b_dones == 0
+            indices = torch.randperm(valid_obs.size(0))
+            split = int(0.8 * valid_obs.size(0))
+            train_idx, val_idx = indices[:split], indices[split:]
+            
+            train_obs, train_actions, train_next_obs = valid_obs[train_idx], valid_actions[train_idx], valid_next_obs[train_idx]
+            val_obs, val_actions, val_next_obs = valid_obs[val_idx], valid_actions[val_idx], valid_next_obs[val_idx]
+
+        best_val_mse = float('inf')
+        for pretrain_epoch in trange(5000, desc="Pretraining"):
             if mask.sum() == 0:
-                break
-                
+                break  # Skip if no valid data
+
+            # Training step
             dynamic_optimizer.zero_grad()
-            pred_next_obs = dynamic_model(b_obs[mask], b_actions[mask])
-            loss = nn.MSELoss()(pred_next_obs, b_next_obs[mask])
+            pred_train = dynamic_model(train_obs, train_actions)
+            loss = nn.MSELoss()(pred_train, train_next_obs)
             loss.backward()
             dynamic_optimizer.step()
             
+            # Calculate metrics
             with torch.no_grad():
-                mse = loss.item()
-                mae = nn.L1Loss()(pred_next_obs, b_next_obs[mask]).item()
-                r2 = r2_score(b_next_obs[mask].cpu().numpy(), pred_next_obs.detach().cpu().numpy())
+                # Training metrics
+                train_mse = loss.item()
+                train_mae = nn.L1Loss()(pred_train, train_next_obs).item()
+                train_r2 = r2_score(train_next_obs.cpu().numpy(), pred_train.detach().cpu().numpy())
+                
+                # Validation metrics
+                pred_val = dynamic_model(val_obs, val_actions)
+                val_mse = nn.MSELoss()(pred_val, val_next_obs).item()
+                val_mae = nn.L1Loss()(pred_val, val_next_obs).item()
+                val_r2 = r2_score(val_next_obs.cpu().numpy(), pred_val.detach().cpu().numpy())
             
-            writer.add_scalar("dynamic/pretrain_mse", mse, pretrain_epoch)
-            writer.add_scalar("dynamic/pretrain_mae", mae, pretrain_epoch)
-            writer.add_scalar("dynamic/pretrain_r2", r2, pretrain_epoch)
+            # Log both training and validation metrics
+            writer.add_scalar("dynamic/pretrain_train_mse", train_mse, pretrain_epoch)
+            writer.add_scalar("dynamic/pretrain_train_mae", train_mae, pretrain_epoch) 
+            writer.add_scalar("dynamic/pretrain_train_r2", train_r2, pretrain_epoch)
+            writer.add_scalar("dynamic/pretrain_val_mse", val_mse, pretrain_epoch)
+            writer.add_scalar("dynamic/pretrain_val_mae", val_mae, pretrain_epoch)
+            writer.add_scalar("dynamic/pretrain_val_r2", val_r2, pretrain_epoch)
             
-            if mse < 1e-2:
+            if val_mse < 1e-3:  # Early stopping on validation
                 break
-        print(f"Pretraining complete. Final MSE: {mse:.4f}. Final R2: {r2: .4f}")
+        print(f"Pretraining complete. Val MSE: {val_mse:.4f}, Val R²: {val_r2:.2f}")
 
         # bootstrap value if not done
         with torch.no_grad():

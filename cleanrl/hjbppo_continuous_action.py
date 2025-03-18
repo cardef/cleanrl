@@ -403,33 +403,33 @@ if __name__ == "__main__":
             print("Pretraining reward model...")
             best_val_mse_r = float('inf')
             patience_counter_r = 0
-        for pretrain_epoch in trange(5000, desc="Reward Pretraining"):
-            # Training step
-            reward_optimizer.zero_grad()
-            pred_train = reward_model(b_obs[train_idx_r], b_actions[train_idx_r])
-            loss = nn.MSELoss()(pred_train, b_rewards[train_idx_r])
-            loss.backward()
-            reward_optimizer.step()
-            
-            # Validation
-            with torch.no_grad():
-                pred_val = reward_model(b_obs[val_idx_r], b_actions[val_idx_r])
-                val_mse = nn.MSELoss()(pred_val, b_rewards[val_idx_r]).item()
-                val_mae = nn.L1Loss()(pred_val, b_rewards[val_idx_r]).item()
-                val_r2 = r2_score(b_rewards[val_idx_r].cpu().numpy(), pred_val.cpu().numpy())
+            for pretrain_epoch in trange(5000, desc="Reward Pretraining"):
+                # Training step
+                reward_optimizer.zero_grad()
+                pred_train = reward_model(b_obs[train_idx_r], b_actions[train_idx_r])
+                loss = nn.MSELoss()(pred_train, b_rewards[train_idx_r])
+                loss.backward()
+                reward_optimizer.step()
                 
-            writer.add_scalar("reward/pretrain_train_mse", loss.item(), pretrain_epoch)
-            writer.add_scalar("reward/pretrain_val_mse", val_mse, pretrain_epoch)
-            writer.add_scalar("reward/pretrain_val_mae", val_mae, pretrain_epoch)
-            writer.add_scalar("reward/pretrain_val_r2", val_r2, pretrain_epoch)
-            
-            # Early stopping
-            if val_mse < (best_val_mse_r - 1e-5):
-                best_val_mse_r = val_mse
-                patience_counter_r = 0
-            else:
-                if (patience_counter_r := patience_counter_r + 1) >= 5:
-                    break
+                # Validation
+                with torch.no_grad():
+                    pred_val = reward_model(b_obs[val_idx_r], b_actions[val_idx_r])
+                    val_mse = nn.MSELoss()(pred_val, b_rewards[val_idx_r]).item()
+                    val_mae = nn.L1Loss()(pred_val, b_rewards[val_idx_r]).item()
+                    val_r2 = r2_score(b_rewards[val_idx_r].cpu().numpy(), pred_val.cpu().numpy())
+                    
+                writer.add_scalar("reward/pretrain_train_mse", loss.item(), pretrain_epoch)
+                writer.add_scalar("reward/pretrain_val_mse", val_mse, pretrain_epoch)
+                writer.add_scalar("reward/pretrain_val_mae", val_mae, pretrain_epoch)
+                writer.add_scalar("reward/pretrain_val_r2", val_r2, pretrain_epoch)
+                
+                # Early stopping
+                if val_mse < (best_val_mse_r - 1e-5):
+                    best_val_mse_r = val_mse
+                    patience_counter_r = 0
+                else:
+                    if (patience_counter_r := patience_counter_r + 1) >= 5:
+                        break
 
         # bootstrap value if not done
         with torch.no_grad():

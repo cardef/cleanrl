@@ -267,6 +267,8 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
 
     for iteration in range(1, args.num_iterations + 1):
+        dynamic_model.train()
+        reward_model.train()
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -516,21 +518,16 @@ if __name__ == "__main__":
                     # 3. Action optimization setup
                     action_low = torch.tensor(envs.single_action_space.low, device=device)
                     action_high = torch.tensor(envs.single_action_space.high, device=device)
-                    
-                    # 4. Single graph construction for multiple steps
-                    # 5. Action optimization with AdamW and early stopping
-                    action_low = torch.tensor(envs.single_action_space.low, device=device)
-                    action_high = torch.tensor(envs.single_action_space.high, device=device)
 
                     # Set models to evaluation mode before optimization
                     dynamic_model.eval()
                     reward_model.eval()
 
-                    action_optimizer = optim.AdamW([a_opt], lr=0.01)
+                    action_optimizer = optim.AdamW([a_opt], lr=0.001)
                     best_hamiltonian = float('inf')
                     best_a_opt = a_opt.data.clone()
                     no_improve = 0
-                    patience = 3  # Stop if no improvement for 3 consecutive steps
+                    patience = 5  # Stop if no improvement for 3 consecutive steps
 
                     for _ in range(args.hjb_opt_steps):
                         action_optimizer.zero_grad()
@@ -550,7 +547,7 @@ if __name__ == "__main__":
                             a_opt.data = torch.clamp(a_opt.data, action_low, action_high)
                         
                         # Track best action and early stopping
-                        current_loss = loss_hamiltonian.item()
+                        current_loss = loss_hamiltonian.item() #it's not real current loss, but the loss of the previous step ai!
                         if current_loss < best_hamiltonian - 1e-5:
                             best_hamiltonian = current_loss
                             best_a_opt = a_opt.data.clone().detach()
@@ -561,8 +558,7 @@ if __name__ == "__main__":
                                 break
 
                     # Restore training mode for models
-                    dynamic_model.train()
-                    reward_model.train()
+                    
 
 
                     # 6. Final Hamiltonian calculation with best action

@@ -293,6 +293,8 @@ if __name__ == "__main__":
             val_obs, val_actions, val_next_obs = valid_obs[val_idx], valid_actions[val_idx], valid_next_obs[val_idx]
 
         best_val_mse = float('inf')
+        patience_counter = 0
+        patience, min_delta = 5, 1e-5  # Wait 5 epochs for >0.00001 improvement
         for pretrain_epoch in trange(5000, desc="Pretraining"):
             if mask.sum() == 0:
                 break  # Skip if no valid data
@@ -325,8 +327,14 @@ if __name__ == "__main__":
             writer.add_scalar("dynamic/pretrain_val_mae", val_mae, pretrain_epoch)
             writer.add_scalar("dynamic/pretrain_val_r2", val_r2, pretrain_epoch)
             
-            if val_mse < 1e-3:  # Implement an early stopping with delta and patience ai!
-                break
+            # Early stopping check
+            if val_mse < (best_val_mse - min_delta):
+                best_val_mse = val_mse
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
         print(f"Pretraining complete. Val MSE: {val_mse:.4f}, Val R²: {val_r2:.2f}")
 
         # bootstrap value if not done

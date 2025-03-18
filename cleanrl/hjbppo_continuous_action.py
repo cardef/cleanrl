@@ -44,7 +44,7 @@ class Args:
     hf_entity: str = ""
     hjb_coef: float = 1.0
     """coefficient for HJB residual loss"""
-    hjb_opt_steps: int = 1
+    hjb_opt_steps: int = 0
     """number of optimization steps for action"""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
@@ -125,7 +125,7 @@ class ODEFunc(nn.Module):
             layer_init(nn.Linear(input_dim, 256)),
             nn.SiLU(),
             layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
+            nn.SiLU(),
             layer_init(nn.Linear(256, 256)),
             nn.SiLU(),
             layer_init(nn.Linear(256, input_dim)),

@@ -487,13 +487,13 @@ if __name__ == "__main__":
                         a_optimizer.zero_grad()
                         
                         # Compute dynamics and reward
-                        with torch.no_grad():
+                        with torch.no_grad(): #why? ai!
                             dx = dynamic_model(obs_batch, a_opt)
                             r = reward_model(obs_batch, a_opt)
                         
                         # Compute gradient of V w.r.t. observations
                         dVdx = torch.autograd.grad(
-                            current_V.sum(), obs_batch,
+                            current_V, obs_batch, grad_outputs=torch.ones_like(obs_batch)
                             create_graph=True, retain_graph=True
                         )[0]
                         

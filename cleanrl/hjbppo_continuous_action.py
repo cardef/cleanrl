@@ -11,7 +11,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torchdiffeq import odeint_adjoint as odeint
 from sklearn.metrics import r2_score
-from torch.func import grad, vmap
+from torch import vmap
+from torch.autograd import grad
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
@@ -488,7 +489,6 @@ if __name__ == "__main__":
                     dVdx = vmap(get_value_grad)(obs_batch)
                     # Reshape to match original dimensions
                     dVdx = dVdx.reshape_as(obs_batch)
-                    dVdx = dVdx.detach()
 
                     # 3. Action optimization setup
                     lr = 0.1  # Fixed learning rate for action updates

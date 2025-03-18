@@ -519,31 +519,48 @@ if __name__ == "__main__":
                     action_high = torch.tensor(envs.single_action_space.high, device=device)
                     
                     # 4. Single graph construction for multiple steps
-                    dx = dynamic_model(obs_batch, a_opt)
-                    r = reward_model(obs_batch, a_opt)
-                    hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
-                    loss_hamiltonian = -hamiltonian.mean().requires_grad_(True)
-                    grad_a = torch.autograd.grad(loss_hamiltonian, a_opt, create_graph=False)[0]
+                    # 5. Action optimization with AdamW and early stopping
+                    action_optimizer = optim.AdamW([a_opt], lr=0.1)
+                    best_hamiltonian = float('inf')
+                    best_a_opt = a_opt.data.clone()
+                    no_improve = 0
+                    patience = 3  # Stop if no improvement for 3 consecutive steps
 
-                    # 5. Manual gradient descent steps
                     for _ in range(args.hjb_opt_steps):
-                        with torch.no_grad():
-                            # Update action parameter
-                            a_opt.data -= lr * grad_a
-                            # Clamp to action space
-                            a_opt.data = torch.clamp(a_opt.data, action_low, action_high)
-                            # Recompute gradients if needed
-                            if _ < args.hjb_opt_steps - 1:
-                                dx = dynamic_model(obs_batch, a_opt)
-                                r = reward_model(obs_batch, a_opt)
-                                hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
-                                loss_hamiltonian = -hamiltonian.mean().requires_grad_(True)
-                                grad_a = torch.autograd.grad(loss_hamiltonian, a_opt, create_graph=False)[0]
-
-                    # 6. Final Hamiltonian calculation
-                    with torch.no_grad():
+                        action_optimizer.zero_grad()
+                        
+                        # Forward pass
                         dx = dynamic_model(obs_batch, a_opt)
                         r = reward_model(obs_batch, a_opt)
+                        hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
+                        loss_hamiltonian = -hamiltonian.mean()
+                        
+                        # Backward and optimize
+                        loss_hamiltonian.backward()
+                        action_optimizer.step()
+                        
+                        # Clamp to action space
+                        with torch.no_grad():
+                            a_opt.data = torch.clamp(a_opt.data, action_low, action_high)
+                        
+                        # Track best action and early stopping
+                        current_loss = loss_hamiltonian.item()
+                        if current_loss < best_hamiltonian - 1e-5:
+                            best_hamiltonian = current_loss
+                            best_a_opt = a_opt.data.clone()
+                            no_improve = 0
+                        else:
+                            no_improve += 1
+                            if no_improve >= patience:
+                                break
+
+                    # Restore best action found
+                    with torch.no_grad():
+                        a_opt.data.copy_(best_a_opt)
+
+                    # 6. Final Hamiltonian calculation with best action
+                    dx = dynamic_model(obs_batch, a_opt)
+                    r = reward_model(obs_batch, a_opt)
                     hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
                     hjb_residual = current_V * np.log(args.gamma) + hamiltonian.detach()
                     hjb_loss = 0.5*(hjb_residual ** 2).mean()

@@ -508,7 +508,7 @@ if __name__ == "__main__":
                     v_loss += args.hjb_coef * (hjb_residual ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef #add hjb_loss here ai!
 
                 optimizer.zero_grad()
                 loss.backward()

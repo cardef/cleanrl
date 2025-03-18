@@ -546,8 +546,14 @@ if __name__ == "__main__":
                         with torch.no_grad():
                             a_opt.data = torch.clamp(a_opt.data, action_low, action_high)
                         
+                        # Recompute loss with updated action for accurate tracking
+                        with torch.no_grad():
+                            dx_current = dynamic_model(obs_batch, a_opt)
+                            r_current = reward_model(obs_batch, a_opt)
+                            hamiltonian_current = r_current + torch.einsum("...i,...i->...", dVdx, dx_current)
+                            current_loss = -hamiltonian_current.mean().item()
+                        
                         # Track best action and early stopping
-                        current_loss = loss_hamiltonian.item() #it's not real current loss, but the loss of the previous step ai!
                         if current_loss < best_hamiltonian - 1e-5:
                             best_hamiltonian = current_loss
                             best_a_opt = a_opt.data.clone().detach()

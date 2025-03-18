@@ -164,9 +164,9 @@ class RewardModel(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             layer_init(nn.Linear(obs_dim + action_dim, 256)),
-            nn.Tanh(),
+            nn.SiLU(),
             layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
+            nn.SiLU(),
             layer_init(nn.Linear(256, 1)),
         )
     

@@ -9,11 +9,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchdiffeq import odeint
+from torchdiffeq import odeint_adjoint as odeint
 from sklearn.metrics import r2_score
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import trange
 
 
 @dataclass
@@ -50,7 +51,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 512
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -97,9 +98,9 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
         env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -1, 1))
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -1, 1))
         return env
 
     return thunk
@@ -119,6 +120,8 @@ class ODEFunc(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(256, 256)),
             nn.Tanh(),
+            layer_init(nn.Linear(256, 256)),
+            nn.Tanh(),
             layer_init(nn.Linear(256, input_dim)),
         )
         
@@ -133,7 +136,7 @@ class DynamicModel(nn.Module):
         
     def forward(self, obs, action):
         x = torch.cat([obs, action], dim=1)
-        next_x = odeint(self.ode_func, x, torch.tensor([0.0, self.dt]).to(x.device))[-1]
+        next_x = odeint(self.ode_func, x, torch.tensor([0.0, self.dt],).to(x.device), method='rk4', options=dict(step_size=self.dt/5))[-1]
         return next_x[:, :obs.shape[1]]
 
 
@@ -213,8 +216,8 @@ if __name__ == "__main__":
     obs_dim = np.prod(envs.single_observation_space.shape)
     action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
-    dynamic_optimizer = optim.Adam(dynamic_model.parameters(), lr=1e-3)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=3e-4)
+    optimizer = optim.AdamW(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -267,7 +270,7 @@ if __name__ == "__main__":
         
         # Dynamic model pretraining
         print("Pretraining dynamic model...")
-        for pretrain_epoch in range(100):
+        for pretrain_epoch in trange(5000):
             b_obs = obs.reshape(-1, obs_dim)
             b_actions = actions.reshape(-1, action_dim)
             b_next_obs = next_observations.reshape(-1, obs_dim)
@@ -292,9 +295,9 @@ if __name__ == "__main__":
             writer.add_scalar("dynamic/pretrain_mae", mae, pretrain_epoch)
             writer.add_scalar("dynamic/pretrain_r2", r2, pretrain_epoch)
             
-            if mse < 1e-4:
+            if mse < 1e-2:
                 break
-        print(f"Pretraining complete. Final MSE: {mse:.4f}")
+        print(f"Pretraining complete. Final MSE: {mse:.4f}. Final R2: {r2: .4f}")
 
         # bootstrap value if not done
         with torch.no_grad():

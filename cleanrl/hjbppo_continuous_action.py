@@ -519,6 +519,13 @@ if __name__ == "__main__":
                     
                     # 4. Single graph construction for multiple steps
                     # 5. Action optimization with AdamW and early stopping
+                    action_low = torch.tensor(envs.single_action_space.low, device=device)
+                    action_high = torch.tensor(envs.single_action_space.high, device=device)
+
+                    # Set models to evaluation mode before optimization
+                    dynamic_model.eval()
+                    reward_model.eval()
+
                     action_optimizer = optim.AdamW([a_opt], lr=0.01)
                     best_hamiltonian = float('inf')
                     best_a_opt = a_opt.data.clone()
@@ -534,8 +541,8 @@ if __name__ == "__main__":
                         hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
                         loss_hamiltonian = -hamiltonian.mean()
                         
-                        # Backward and optimize
-                        loss_hamiltonian.backward()
+                        # Backward and optimize with retain_graph
+                        loss_hamiltonian.backward(retain_graph=True)
                         action_optimizer.step()
                         
                         # Clamp to action space
@@ -552,6 +559,10 @@ if __name__ == "__main__":
                             no_improve += 1
                             if no_improve >= patience:
                                 break
+
+                    # Restore training mode for models
+                    dynamic_model.train()
+                    reward_model.train()
 
 
                     # 6. Final Hamiltonian calculation with best action

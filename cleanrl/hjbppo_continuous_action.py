@@ -51,7 +51,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 512
+    num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -117,11 +117,11 @@ class ODEFunc(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             layer_init(nn.Linear(input_dim, 256)),
-            nn.Tanh(),
+            nn.SiLU(),
             layer_init(nn.Linear(256, 256)),
             nn.Tanh(),
             layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
+            nn.SiLU(),
             layer_init(nn.Linear(256, input_dim)),
         )
         
@@ -216,7 +216,7 @@ if __name__ == "__main__":
     obs_dim = np.prod(envs.single_observation_space.shape)
     action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
-    dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=3e-4)
+    dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=1e-3)
     optimizer = optim.AdamW(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -325,7 +325,7 @@ if __name__ == "__main__":
             writer.add_scalar("dynamic/pretrain_val_mae", val_mae, pretrain_epoch)
             writer.add_scalar("dynamic/pretrain_val_r2", val_r2, pretrain_epoch)
             
-            if val_mse < 1e-3:  # Early stopping on validation
+            if val_mse < 1e-3:  # Implement an early stopping with delta and patience ai!
                 break
         print(f"Pretraining complete. Val MSE: {val_mse:.4f}, Val R²: {val_r2:.2f}")
 

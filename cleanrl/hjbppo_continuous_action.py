@@ -40,9 +40,9 @@ class Args:
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
-    hjb_coef: float = 0.1
+    hjb_coef: float = 1.0
     """coefficient for HJB residual loss"""
-    hjb_opt_steps: int = 5
+    hjb_opt_steps: int = 1
     """number of optimization steps for action"""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
@@ -481,9 +481,9 @@ if __name__ == "__main__":
 
                     # 2. Precompute value gradient
                     dVdx = torch.autograd.grad(
-                        current_V.sum(), obs_batch,
-                        retain_graph=True, create_graph=False
-                    )[0].detach()
+                        current_V, obs_batch,
+                        retain_graph=True, create_graph=False, grad_outputs=torch.ones_like(current_V)
+                    )[0] #I want to be calculated a batched gradient through vmap andgrad ai!
 
                     # 3. Action optimization setup
                     lr = 0.1  # Fixed learning rate for action updates

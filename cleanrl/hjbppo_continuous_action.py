@@ -494,7 +494,7 @@ if __name__ == "__main__":
                     dx = dynamic_model(obs_batch, a_opt)
                     r = reward_model(obs_batch, a_opt)
                     hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
-                    loss_hamiltonian = -hamiltonian.mean()
+                    loss_hamiltonian = -hamiltonian.mean().requires_grad_(True)
                     grad_a = torch.autograd.grad(loss_hamiltonian, a_opt, create_graph=False)[0]
 
                     # 5. Manual gradient descent steps
@@ -509,7 +509,7 @@ if __name__ == "__main__":
                                 dx = dynamic_model(obs_batch, a_opt)
                                 r = reward_model(obs_batch, a_opt)
                                 hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
-                                loss_hamiltonian = -hamiltonian.mean()
+                                loss_hamiltonian = -hamiltonian.mean().requires_grad_(True)
                                 grad_a = torch.autograd.grad(loss_hamiltonian, a_opt, create_graph=False)[0]
 
                     # 6. Final Hamiltonian calculation

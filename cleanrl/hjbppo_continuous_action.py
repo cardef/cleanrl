@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torchdiffeq import odeint_adjoint as odeint
 from sklearn.metrics import r2_score
+from torch.func import grad, vmap
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
@@ -480,10 +481,14 @@ if __name__ == "__main__":
                     a_opt = torch.nn.Parameter(a0.clone(), requires_grad=True)
 
                     # 2. Precompute value gradient
-                    dVdx = torch.autograd.grad(
-                        current_V, obs_batch,
-                        retain_graph=True, create_graph=False, grad_outputs=torch.ones_like(current_V)
-                    )[0] #I want to be calculated a batched gradient through vmap andgrad ai!
+                    def get_value_grad(single_obs):
+                        return grad(lambda x: agent.get_value(x.unsqueeze(0)).squeeze())(single_obs)
+                    
+                    # Vectorize over batch dimension
+                    dVdx = vmap(get_value_grad)(obs_batch)
+                    # Reshape to match original dimensions
+                    dVdx = dVdx.reshape_as(obs_batch)
+                    dVdx = dVdx.detach()
 
                     # 3. Action optimization setup
                     lr = 0.1  # Fixed learning rate for action updates

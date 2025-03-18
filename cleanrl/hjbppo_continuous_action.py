@@ -44,7 +44,7 @@ class Args:
     hf_entity: str = ""
     hjb_coef: float = 1.0
     """coefficient for HJB residual loss"""
-    hjb_opt_steps: int = 0
+    hjb_opt_steps: int = 10
     """number of optimization steps for action"""
     hjb_dynamic_threshold: float = 0.01
     """MSE threshold for dynamic model"""
@@ -544,7 +544,7 @@ if __name__ == "__main__":
                     with torch.no_grad():
                         dx = dynamic_model(obs_batch, a_opt)
                         r = reward_model(obs_batch, a_opt)
-                        hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
+                    hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
                     hjb_residual = current_V * np.log(args.gamma) + hamiltonian.detach()
                     hjb_loss = 0.5*(hjb_residual ** 2).mean()
 

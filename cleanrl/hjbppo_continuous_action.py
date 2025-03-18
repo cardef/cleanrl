@@ -467,30 +467,6 @@ if __name__ == "__main__":
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
-                # Train dynamic model with current batch
-                dynamic_optimizer.zero_grad()
-                pred_next_obs = dynamic_model(b_obs[mb_inds], b_actions[mb_inds])
-                dynamic_loss = nn.MSELoss()(pred_next_obs, b_next_obs[mb_inds])
-                dynamic_loss.backward()
-                dynamic_optimizer.step()
-                
-                # Log dynamic model metrics
-                with torch.no_grad():
-                    mse = dynamic_loss.item()
-                    mae = nn.L1Loss()(pred_next_obs, b_next_obs[mb_inds]).item()
-                    r2 = r2_score(b_next_obs[mb_inds].cpu().numpy(), pred_next_obs.detach().cpu().numpy())
-                    writer.add_scalar("dynamic/mse", mse, global_step)
-
-                # Train reward model
-                reward_optimizer.zero_grad()
-                pred_rewards = reward_model(b_obs[mb_inds], b_actions[mb_inds])
-                reward_loss = nn.MSELoss()(pred_rewards, b_rewards[mb_inds])
-                reward_loss.backward()
-                reward_optimizer.step()
-                
-                writer.add_scalar("reward/mse", reward_loss.item(), global_step)
-                writer.add_scalar("reward/mae", nn.L1Loss()(pred_rewards, b_rewards[mb_inds]).item(), global_step)
-
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)

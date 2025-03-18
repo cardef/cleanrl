@@ -502,6 +502,10 @@ if __name__ == "__main__":
                         loss_hamiltonian = -hamiltonian.mean()
                         loss_hamiltonian.backward(retain_graph=True)
                         a_optimizer.step()
+                        # Clamp actions to valid space
+                        with torch.no_grad():
+                            a_opt.data = torch.clamp(a_opt.data, torch.tensor(envs.single_action_space.low, device=device), 
+                                                     torch.tensor(envs.single_action_space.high, device=device))
                     
                     # 5. Compute HJB residual
                     hjb_residual = current_V * np.log(args.gamma) + hamiltonian.detach()

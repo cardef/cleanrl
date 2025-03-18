@@ -478,37 +478,45 @@ if __name__ == "__main__":
                     with torch.no_grad():
                         a0, _, _, _ = agent.get_action_and_value(obs_batch)
                     a_opt = torch.nn.Parameter(a0.clone(), requires_grad=True)
-                    
-                    # 3. Create optimizer for action
-                    a_optimizer = torch.optim.AdamW([a_opt], lr=1e-3)
 
-                    # Compute gradient of V w.r.t. observations
+                    # 2. Precompute value gradient
                     dVdx = torch.autograd.grad(
-                            current_V, obs_batch, grad_outputs=torch.ones_like(current_V),
-                            create_graph=False, retain_graph=True
-                        )[0]
+                        current_V.sum(), obs_batch,
+                        retain_graph=True, create_graph=False
+                    )[0].detach()
+
+                    # 3. Action optimization setup
+                    lr = 0.1  # Fixed learning rate for action updates
+                    action_low = torch.tensor(envs.single_action_space.low, device=device)
+                    action_high = torch.tensor(envs.single_action_space.high, device=device)
                     
-                    # 4. Action optimization loop
+                    # 4. Single graph construction for multiple steps
+                    dx = dynamic_model(obs_batch, a_opt)
+                    r = reward_model(obs_batch, a_opt)
+                    hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
+                    loss_hamiltonian = -hamiltonian.mean()
+                    grad_a = torch.autograd.grad(loss_hamiltonian, a_opt, create_graph=False)[0]
+
+                    # 5. Manual gradient descent steps
                     for _ in range(args.hjb_opt_steps):
-                        
-                        
-                        # Compute dynamics and reward
-                        
+                        with torch.no_grad():
+                            # Update action parameter
+                            a_opt.data -= lr * grad_a
+                            # Clamp to action space
+                            a_opt.data = torch.clamp(a_opt.data, action_low, action_high)
+                            # Recompute gradients if needed
+                            if _ < args.hjb_opt_steps - 1:
+                                dx = dynamic_model(obs_batch, a_opt)
+                                r = reward_model(obs_batch, a_opt)
+                                hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
+                                loss_hamiltonian = -hamiltonian.mean()
+                                grad_a = torch.autograd.grad(loss_hamiltonian, a_opt, create_graph=False)[0]
+
+                    # 6. Final Hamiltonian calculation
+                    with torch.no_grad():
                         dx = dynamic_model(obs_batch, a_opt)
                         r = reward_model(obs_batch, a_opt)
-                        
-                        # Compute Hamiltonian
-                        hamiltonian = r + torch.einsum("...i, ...i -> ...", dVdx, dx)
-                        loss_hamiltonian = -hamiltonian.mean()
-                        a_optimizer.zero_grad()
-                        loss_hamiltonian.backward()
-                        a_optimizer.step()
-                        # Clamp actions to valid space
-                        with torch.no_grad():
-                            a_opt.data = torch.clamp(a_opt.data, torch.tensor(envs.single_action_space.low, device=device), 
-                                                     torch.tensor(envs.single_action_space.high, device=device))
-                    
-                    # 5. Compute HJB residual
+                        hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
                     hjb_residual = current_V * np.log(args.gamma) + hamiltonian.detach()
                     hjb_loss = 0.5*(hjb_residual ** 2).mean()
 

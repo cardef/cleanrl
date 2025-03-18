@@ -487,7 +487,7 @@ if __name__ == "__main__":
                         a_optimizer.zero_grad()
                         
                         # Compute dynamics and reward
-                        with torch.no_grad(): #why? ai!
+                        with torch.no_grad():
                             dx = dynamic_model(obs_batch, a_opt)
                             r = reward_model(obs_batch, a_opt)
                         

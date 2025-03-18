@@ -46,6 +46,10 @@ class Args:
     """coefficient for HJB residual loss"""
     hjb_opt_steps: int = 0
     """number of optimization steps for action"""
+    hjb_dynamic_threshold: float = 0.01
+    """MSE threshold for dynamic model"""
+    hjb_reward_threshold: float = 0.05
+    """MSE threshold for reward model"""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
@@ -295,9 +299,7 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
         
-        # Dynamic model pretraining
-        print("Pretraining dynamic model...")
-        # Prepare data once before training loop
+        # Prepare data for dynamic model
         b_obs = obs.reshape(-1, obs_dim)
         b_actions = actions.reshape(-1, action_dim)
         b_next_obs = next_observations.reshape(-1, obs_dim)
@@ -305,19 +307,35 @@ if __name__ == "__main__":
         
         mask = b_dones == 0
         if mask.sum() == 0:
-            print("No valid transitions for pretraining")
+            print("No valid transitions for evaluation/training")
+            initial_val_mse = float('inf')  # Force training if we get data later
+            writer.add_scalar("dynamic/initial_val_mse", initial_val_mse, iteration)
+            continue
+            
+        # Split into train/validation (80/20)
+        valid_obs = b_obs[mask]
+        valid_actions = b_actions[mask]
+        valid_next_obs = b_next_obs[mask]
+        
+        indices = torch.randperm(valid_obs.size(0))
+        split = int(0.8 * valid_obs.size(0))
+        train_idx, val_idx = indices[:split], indices[split:]
+        
+        train_obs, train_actions, train_next_obs = valid_obs[train_idx], valid_actions[train_idx], valid_next_obs[train_idx]
+        val_obs, val_actions, val_next_obs = valid_obs[val_idx], valid_actions[val_idx], valid_next_obs[val_idx]
+
+        # Dynamic model evaluation check
+        print("Evaluating dynamic model...")
+        with torch.no_grad():
+            pred_val = dynamic_model(val_obs, val_actions)
+            initial_val_mse = nn.MSELoss()(pred_val, val_next_obs).item()
+        
+        writer.add_scalar("dynamic/initial_val_mse", initial_val_mse, iteration)
+        
+        if initial_val_mse <= args.hjb_dynamic_threshold:
+            print(f"Dynamic model already good (val MSE {initial_val_mse:.4f} <= {args.hjb_dynamic_threshold}), skipping training")
         else:
-            # Split into train/validation (80/20)
-            valid_obs = b_obs[mask]
-            valid_actions = b_actions[mask]
-            valid_next_obs = b_next_obs[mask]
-            
-            indices = torch.randperm(valid_obs.size(0))
-            split = int(0.8 * valid_obs.size(0))
-            train_idx, val_idx = indices[:split], indices[split:]
-            
-            train_obs, train_actions, train_next_obs = valid_obs[train_idx], valid_actions[train_idx], valid_next_obs[train_idx]
-            val_obs, val_actions, val_next_obs = valid_obs[val_idx], valid_actions[val_idx], valid_next_obs[val_idx]
+            print("Pretraining dynamic model...")
 
         best_val_mse = float('inf')
         patience_counter = 0
@@ -364,8 +382,8 @@ if __name__ == "__main__":
                     break
         print(f"Pretraining complete. Val MSE: {val_mse:.4f}, Val R²: {val_r2:.2f}")
 
-        # Reward model pretraining
-        print("Pretraining reward model...")
+        # Reward model evaluation check
+        print("Evaluating reward model...")
         b_rewards = rewards.reshape(-1)
         
         # Use all transitions since rewards are valid even when done
@@ -373,8 +391,18 @@ if __name__ == "__main__":
         split = int(0.8 * b_obs.size(0))
         train_idx_r, val_idx_r = indices[:split], indices[split:]
         
-        best_val_mse_r = float('inf')
-        patience_counter_r = 0
+        with torch.no_grad():
+            pred_val_r = reward_model(b_obs[val_idx_r], b_actions[val_idx_r])
+            initial_val_mse_r = nn.MSELoss()(pred_val_r, b_rewards[val_idx_r]).item()
+        
+        writer.add_scalar("reward/initial_val_mse", initial_val_mse_r, iteration)
+        
+        if initial_val_mse_r <= args.hjb_reward_threshold:
+            print(f"Reward model already good (val MSE {initial_val_mse_r:.4f} <= {args.hjb_reward_threshold}), skipping training")
+        else:
+            print("Pretraining reward model...")
+            best_val_mse_r = float('inf')
+            patience_counter_r = 0
         for pretrain_epoch in trange(5000, desc="Reward Pretraining"):
             # Training step
             reward_optimizer.zero_grad()

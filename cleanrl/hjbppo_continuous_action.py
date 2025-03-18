@@ -482,11 +482,8 @@ if __name__ == "__main__":
                     a_opt = torch.nn.Parameter(a0.clone(), requires_grad=True)
 
                     # 2. Precompute value gradient
-                    def value_fn(x):
-                        return agent.get_value(x)
-                    
-                    # Compute gradients using torch.func
-                    dVdx = vmap(grad(value_fn))(obs_batch)
+                    compute_value_grad = grad(lambda x: agent.get_value(x).squeeze())
+                    dVdx = vmap(compute_value_grad, in_dims=(0))(obs_batch)
 
                     # 3. Action optimization setup
                     lr = 0.1

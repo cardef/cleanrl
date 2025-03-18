@@ -493,14 +493,14 @@ if __name__ == "__main__":
                         
                         # Compute gradient of V w.r.t. observations
                         dVdx = torch.autograd.grad(
-                            current_V, obs_batch, grad_outputs=torch.ones_like(obs_batch)
+                            current_V, obs_batch, grad_outputs=torch.ones_like(current_V),
                             create_graph=True, retain_graph=True
                         )[0]
                         
                         # Compute Hamiltonian
                         hamiltonian = r + (dVdx * dx).sum(dim=1)
                         loss_hamiltonian = -hamiltonian.mean()
-                        loss_hamiltonian.backward()
+                        loss_hamiltonian.backward(retain_graph=True)
                         a_optimizer.step()
                     
                     # 5. Compute HJB residual

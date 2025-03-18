@@ -12,7 +12,7 @@ import torch.optim as optim
 from torchdiffeq import odeint_adjoint as odeint
 from sklearn.metrics import r2_score
 from torch import vmap
-from torch.autograd import grad
+from torch.func import grad
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter

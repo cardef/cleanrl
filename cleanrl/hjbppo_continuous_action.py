@@ -217,6 +217,11 @@ if __name__ == "__main__":
     action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
     dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=1e-3)
+    
+    # Initialize reward model
+    reward_model = RewardModel(obs_dim, action_dim).to(device)
+    reward_optimizer = optim.AdamW(reward_model.parameters(), lr=1e-3)
+    
     optimizer = optim.AdamW(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -337,6 +342,45 @@ if __name__ == "__main__":
                     break
         print(f"Pretraining complete. Val MSE: {val_mse:.4f}, Val R²: {val_r2:.2f}")
 
+        # Reward model pretraining
+        print("Pretraining reward model...")
+        b_rewards = rewards.reshape(-1)
+        
+        # Use all transitions since rewards are valid even when done
+        indices = torch.randperm(b_obs.size(0))
+        split = int(0.8 * b_obs.size(0))
+        train_idx_r, val_idx_r = indices[:split], indices[split:]
+        
+        best_val_mse_r = float('inf')
+        patience_counter_r = 0
+        for pretrain_epoch in trange(5000, desc="Reward Pretraining"):
+            # Training step
+            reward_optimizer.zero_grad()
+            pred_train = reward_model(b_obs[train_idx_r], b_actions[train_idx_r])
+            loss = nn.MSELoss()(pred_train, b_rewards[train_idx_r])
+            loss.backward()
+            reward_optimizer.step()
+            
+            # Validation
+            with torch.no_grad():
+                pred_val = reward_model(b_obs[val_idx_r], b_actions[val_idx_r])
+                val_mse = nn.MSELoss()(pred_val, b_rewards[val_idx_r]).item()
+                val_mae = nn.L1Loss()(pred_val, b_rewards[val_idx_r]).item()
+                val_r2 = r2_score(b_rewards[val_idx_r].cpu().numpy(), pred_val.cpu().numpy())
+                
+            writer.add_scalar("reward/pretrain_train_mse", loss.item(), pretrain_epoch)
+            writer.add_scalar("reward/pretrain_val_mse", val_mse, pretrain_epoch)
+            writer.add_scalar("reward/pretrain_val_mae", val_mae, pretrain_epoch)
+            writer.add_scalar("reward/pretrain_val_r2", val_r2, pretrain_epoch)
+            
+            # Early stopping
+            if val_mse < (best_val_mse_r - 1e-5):
+                best_val_mse_r = val_mse
+                patience_counter_r = 0
+            else:
+                if (patience_counter_r := patience_counter_r + 1) >= 5:
+                    break
+
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -420,6 +464,16 @@ if __name__ == "__main__":
                     mae = nn.L1Loss()(pred_next_obs, b_next_obs[mb_inds]).item()
                     r2 = r2_score(b_next_obs[mb_inds].cpu().numpy(), pred_next_obs.detach().cpu().numpy())
                     writer.add_scalar("dynamic/mse", mse, global_step)
+
+                # Train reward model
+                reward_optimizer.zero_grad()
+                pred_rewards = reward_model(b_obs[mb_inds], b_actions[mb_inds])
+                reward_loss = nn.MSELoss()(pred_rewards, b_rewards[mb_inds])
+                reward_loss.backward()
+                reward_optimizer.step()
+                
+                writer.add_scalar("reward/mse", reward_loss.item(), global_step)
+                writer.add_scalar("reward/mae", nn.L1Loss()(pred_rewards, b_rewards[mb_inds]).item(), global_step)
 
                 optimizer.zero_grad()
                 loss.backward()

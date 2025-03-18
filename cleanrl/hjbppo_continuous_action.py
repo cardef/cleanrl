@@ -159,6 +159,21 @@ class Agent(nn.Module):
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
+class RewardModel(nn.Module):
+    def __init__(self, obs_dim, action_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            layer_init(nn.Linear(obs_dim + action_dim, 256)),
+            nn.Tanh(),
+            layer_init(nn.Linear(256, 256)),
+            nn.Tanh(),
+            layer_init(nn.Linear(256, 1)),
+        )
+    
+    def forward(self, obs, action):
+        x = torch.cat([obs, action], dim=1)
+        return self.net(x).squeeze(-1)
+
     def get_value(self, x):
         return self.critic(x)
 

@@ -514,13 +514,12 @@ if __name__ == "__main__":
                     dVdx = vmap(compute_value_grad, in_dims=(0))(obs_batch)
 
                     # 3. Action optimization setup
-                    lr = 0.1
                     action_low = torch.tensor(envs.single_action_space.low, device=device)
                     action_high = torch.tensor(envs.single_action_space.high, device=device)
                     
                     # 4. Single graph construction for multiple steps
                     # 5. Action optimization with AdamW and early stopping
-                    action_optimizer = optim.AdamW([a_opt], lr=0.1)
+                    action_optimizer = optim.AdamW([a_opt], lr=0.01)
                     best_hamiltonian = float('inf')
                     best_a_opt = a_opt.data.clone()
                     no_improve = 0
@@ -547,22 +546,20 @@ if __name__ == "__main__":
                         current_loss = loss_hamiltonian.item()
                         if current_loss < best_hamiltonian - 1e-5:
                             best_hamiltonian = current_loss
-                            best_a_opt = a_opt.data.clone()
+                            best_a_opt = a_opt.data.clone().detach()
                             no_improve = 0
                         else:
                             no_improve += 1
                             if no_improve >= patience:
                                 break
 
-                    # Restore best action found
-                    with torch.no_grad():
-                        a_opt.data.copy_(best_a_opt)
 
                     # 6. Final Hamiltonian calculation with best action
-                    dx = dynamic_model(obs_batch, a_opt)
-                    r = reward_model(obs_batch, a_opt)
+                    with torch.no_grad():
+                        dx = dynamic_model(obs_batch, best_a_opt)
+                        r = reward_model(obs_batch, best_a_opt)
                     hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
-                    hjb_residual = current_V * np.log(args.gamma) + hamiltonian.detach()
+                    hjb_residual = current_V * np.log(args.gamma) + hamiltonian
                     hjb_loss = 0.5*(hjb_residual ** 2).mean()
 
                 entropy_loss = entropy.mean()

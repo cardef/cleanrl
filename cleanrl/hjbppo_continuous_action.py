@@ -40,6 +40,10 @@ class Args:
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
+    hjb_coef: float = 0.1
+    """coefficient for HJB residual loss"""
+    hjb_opt_steps: int = 3
+    """number of optimization steps for action"""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
@@ -463,6 +467,45 @@ if __name__ == "__main__":
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+
+                # HJB residual term
+                with torch.set_grad_enabled(True):
+                    # 1. Get current observations and values
+                    obs_batch = b_obs[mb_inds].detach().requires_grad_(True)
+                    current_V = agent.get_value(obs_batch)
+                    
+                    # 2. Initialize action from policy network
+                    with torch.no_grad():
+                        a0, _, _, _ = agent.get_action_and_value(obs_batch)
+                    a_opt = torch.nn.Parameter(a0.clone(), requires_grad=True)
+                    
+                    # 3. Create optimizer for action
+                    a_optimizer = torch.optim.Adam([a_opt], lr=1e-3)
+                    
+                    # 4. Action optimization loop
+                    for _ in range(args.hjb_opt_steps):
+                        a_optimizer.zero_grad()
+                        
+                        # Compute dynamics and reward
+                        with torch.no_grad():
+                            dx = dynamic_model(obs_batch, a_opt)
+                            r = reward_model(obs_batch, a_opt)
+                        
+                        # Compute gradient of V w.r.t. observations
+                        dVdx = torch.autograd.grad(
+                            current_V.sum(), obs_batch,
+                            create_graph=True, retain_graph=True
+                        )[0]
+                        
+                        # Compute Hamiltonian
+                        hamiltonian = r + (dVdx * dx).sum(dim=1)
+                        loss_hamiltonian = -hamiltonian.mean()
+                        loss_hamiltonian.backward()
+                        a_optimizer.step()
+                    
+                    # 5. Compute HJB residual
+                    hjb_residual = current_V * np.log(args.gamma) + hamiltonian.detach()
+                    v_loss += args.hjb_coef * (hjb_residual ** 2).mean()
 
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef

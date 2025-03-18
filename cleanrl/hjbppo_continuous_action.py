@@ -9,6 +9,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torchdiffeq import odeint
+from sklearn.metrics import r2_score
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
@@ -109,6 +111,32 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+class ODEFunc(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            layer_init(nn.Linear(input_dim, 256)),
+            nn.Tanh(),
+            layer_init(nn.Linear(256, 256)),
+            nn.Tanh(),
+            layer_init(nn.Linear(256, input_dim)),
+        )
+        
+    def forward(self, t, x):
+        return self.net(x)
+
+class DynamicModel(nn.Module):
+    def __init__(self, obs_dim, action_dim):
+        super().__init__()
+        self.ode_func = ODEFunc(obs_dim + action_dim)
+        self.dt = 0.05  # Should match environment timestep
+        
+    def forward(self, obs, action):
+        x = torch.cat([obs, action], dim=1)
+        next_x = odeint(self.ode_func, x, torch.tensor([0.0, self.dt]).to(x.device))[-1]
+        return next_x[:, :obs.shape[1]]
+
+
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
@@ -180,6 +208,12 @@ if __name__ == "__main__":
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     agent = Agent(envs).to(device)
+    
+    # Initialize dynamic model
+    obs_dim = np.prod(envs.single_observation_space.shape)
+    action_dim = np.prod(envs.single_action_space.shape)
+    dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
+    dynamic_optimizer = optim.Adam(dynamic_model.parameters(), lr=1e-3)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -189,6 +223,7 @@ if __name__ == "__main__":
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    next_observations = torch.zeros_like(obs).to(device)  # Store next observations
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -218,6 +253,7 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            next_observations[step] = torch.Tensor(next_obs).to(device)  # Store before reset
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
@@ -298,6 +334,20 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+
+                # Train dynamic model with current batch
+                dynamic_optimizer.zero_grad()
+                pred_next_obs = dynamic_model(b_obs[mb_inds], b_actions[mb_inds])
+                dynamic_loss = nn.MSELoss()(pred_next_obs, b_next_obs[mb_inds])
+                dynamic_loss.backward()
+                dynamic_optimizer.step()
+                
+                # Log dynamic model metrics
+                with torch.no_grad():
+                    mse = dynamic_loss.item()
+                    mae = nn.L1Loss()(pred_next_obs, b_next_obs[mb_inds]).item()
+                    r2 = r2_score(b_next_obs[mb_inds].cpu().numpy(), pred_next_obs.detach().cpu().numpy())
+                    writer.add_scalar("dynamic/mse", mse, global_step)
 
                 optimizer.zero_grad()
                 loss.backward()

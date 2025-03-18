@@ -42,7 +42,7 @@ class Args:
     hf_entity: str = ""
     hjb_coef: float = 0.1
     """coefficient for HJB residual loss"""
-    hjb_opt_steps: int = 10
+    hjb_opt_steps: int = 5
     """number of optimization steps for action"""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
@@ -485,12 +485,12 @@ if __name__ == "__main__":
                     # Compute gradient of V w.r.t. observations
                     dVdx = torch.autograd.grad(
                             current_V, obs_batch, grad_outputs=torch.ones_like(current_V),
-                            create_graph=True, retain_graph=True
+                            create_graph=False, retain_graph=True
                         )[0]
                     
                     # 4. Action optimization loop
                     for _ in range(args.hjb_opt_steps):
-                        a_optimizer.zero_grad()
+                        
                         
                         # Compute dynamics and reward
                         
@@ -498,9 +498,10 @@ if __name__ == "__main__":
                         r = reward_model(obs_batch, a_opt)
                         
                         # Compute Hamiltonian
-                        hamiltonian = r + (dVdx * dx).sum(dim=1)
+                        hamiltonian = r + torch.einsum("...i, ...i -> ...", dVdx, dx)
                         loss_hamiltonian = -hamiltonian.mean()
-                        loss_hamiltonian.backward(retain_graph=True)
+                        a_optimizer.zero_grad()
+                        loss_hamiltonian.backward()
                         a_optimizer.step()
                         # Clamp actions to valid space
                         with torch.no_grad():

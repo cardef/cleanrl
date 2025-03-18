@@ -264,6 +264,37 @@ if __name__ == "__main__":
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+        
+        # Dynamic model pretraining
+        print("Pretraining dynamic model...")
+        for pretrain_epoch in range(100):
+            b_obs = obs.reshape(-1, obs_dim)
+            b_actions = actions.reshape(-1, action_dim)
+            b_next_obs = next_observations.reshape(-1, obs_dim)
+            b_dones = dones.reshape(-1)
+            
+            mask = b_dones == 0
+            if mask.sum() == 0:
+                break
+                
+            dynamic_optimizer.zero_grad()
+            pred_next_obs = dynamic_model(b_obs[mask], b_actions[mask])
+            loss = nn.MSELoss()(pred_next_obs, b_next_obs[mask])
+            loss.backward()
+            dynamic_optimizer.step()
+            
+            with torch.no_grad():
+                mse = loss.item()
+                mae = nn.L1Loss()(pred_next_obs, b_next_obs[mask]).item()
+                r2 = r2_score(b_next_obs[mask].cpu().numpy(), pred_next_obs.detach().cpu().numpy())
+            
+            writer.add_scalar("dynamic/pretrain_mse", mse, pretrain_epoch)
+            writer.add_scalar("dynamic/pretrain_mae", mae, pretrain_epoch)
+            writer.add_scalar("dynamic/pretrain_r2", r2, pretrain_epoch)
+            
+            if mse < 1e-4:
+                break
+        print(f"Pretraining complete. Final MSE: {mse:.4f}")
 
         # bootstrap value if not done
         with torch.no_grad():

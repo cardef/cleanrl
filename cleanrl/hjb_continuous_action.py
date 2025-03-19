@@ -257,7 +257,9 @@ if __name__ == "__main__":
     reward_model = RewardModel(obs_dim, action_dim).to(device)
     reward_optimizer = optim.AdamW(reward_model.parameters(), lr=1e-3)
     
-    optimizer = optim.AdamW(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    # Separate optimizers for actor and critic
+    actor_optimizer = optim.AdamW(agent.actor.parameters(), lr=args.learning_rate, eps=1e-5)
+    critic_optimizer = optim.AdamW(agent.critic.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -477,8 +479,9 @@ if __name__ == "__main__":
                 mb_inds = b_inds[start:end]
 
                 # Get current actions and values
-                a = agent.get_action(b_obs[mb_inds])
-                current_V = agent.get_value(b_obs[mb_inds])
+                with torch.no_grad():
+                    a = agent.get_action(b_obs[mb_inds])
+                    current_V = agent.get_value(b_obs[mb_inds])
                 
                 # Compute dynamics and reward
                 dx = dynamic_model(b_obs[mb_inds], a)
@@ -491,24 +494,31 @@ if __name__ == "__main__":
                 # Hamiltonian calculation
                 hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
                 
-                # Losses
+                # Policy update step
                 actor_loss = -hamiltonian.mean()
+                actor_optimizer.zero_grad()
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(agent.actor.parameters(), args.max_grad_norm)
+                actor_optimizer.step()
+
+                # Critic update step
+                with torch.no_grad():  # Freeze policy for critic update
+                    new_hamiltonian = hamiltonian.detach()
+                    
+                hjb_residuals = new_hamiltonian + current_V * torch.log(args.gamma)
+                hjb_loss = 0.5*(hjb_residuals**2).mean()
                 v_loss = 0.5 * ((current_V.squeeze() - b_returns[mb_inds]) ** 2).mean()
-                hjb_residuals = hamiltonian + current_V * torch.log(args.gamma)
-                hjb_loss = 0.5*(hjb_loss**2).mean()
-                # Combine losses
-                loss = actor_loss + v_loss * args.vf_coef + hjb_loss * args.hjb_coef
+                critic_loss = v_loss * args.vf_coef + hjb_loss * args.hjb_coef
                 
-                # Optimization step
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                optimizer.step()
+                critic_optimizer.zero_grad()
+                critic_loss.backward()
+                nn.utils.clip_grad_norm_(agent.critic.parameters(), args.max_grad_norm)
+                critic_optimizer.step()
 
                 # Logging
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
                 writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-                writer.add_scalar("losses/hamiltonian_value", hamiltonian.mean().item(), global_step)
+                writer.add_scalar("losses/hjb_residual", hjb_loss.item(), global_step)
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)

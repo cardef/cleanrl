@@ -494,9 +494,10 @@ if __name__ == "__main__":
                 # Losses
                 actor_loss = -hamiltonian.mean()
                 v_loss = 0.5 * ((current_V.squeeze() - b_returns[mb_inds]) ** 2).mean()
-                
+                hjb_residuals = hamiltonian + current_V * torch.log(args.gamma)
+                hjb_loss = 0.5*(hjb_loss**2).mean()
                 # Combine losses
-                loss = actor_loss + v_loss * args.vf_coef
+                loss = actor_loss + v_loss * args.vf_coef + hjb_loss * args.hjb_coef
                 
                 # Optimization step
                 optimizer.zero_grad()

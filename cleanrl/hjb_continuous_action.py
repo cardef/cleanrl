@@ -251,7 +251,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("mps" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
@@ -265,11 +265,11 @@ if __name__ == "__main__":
     obs_dim = np.prod(envs.single_observation_space.shape)
     action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
-    dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=1e-3)
+    dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=args.learning_rate)
     
     # Initialize reward model
     reward_model = RewardModel(obs_dim, action_dim).to(device)
-    reward_optimizer = optim.AdamW(reward_model.parameters(), lr=1e-3)
+    reward_optimizer = optim.AdamW(reward_model.parameters(), lr=args.learning_rate)
     
     # Separate optimizers for actor and critic
     actor_optimizer = optim.AdamW(agent.actor.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -494,10 +494,9 @@ if __name__ == "__main__":
                 mb_inds = b_inds[start:end]
 
                 # Get current actions and values
-                with torch.no_grad():
-                    a = agent.get_action(b_obs[mb_inds])
+                with torch.no_grad():    
                     current_V = agent.get_value(b_obs[mb_inds])
-                
+                a = agent.get_action(b_obs[mb_inds])
                 # Compute dynamics and reward
                 dx = dynamic_model(b_obs[mb_inds], a)
                 r = reward_model(b_obs[mb_inds], a)
@@ -519,7 +518,7 @@ if __name__ == "__main__":
 
                 # Critic update step
                 with torch.no_grad():  # Freeze policy for critic update
-                    new_hamiltonian = hamiltonian.detach()
+                    new_hamiltonian = hamiltonian.detach() #you have
 
                 # Recompute value without no_grad to track gradients
                 current_V_critic = agent.get_value(b_obs[mb_inds]).squeeze()

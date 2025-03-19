@@ -47,6 +47,8 @@ class Args:
     """coefficient for HJB residual loss"""
     hjb_opt_steps: int = 10
     """number of optimization steps for action"""
+    hjb_policy_steps: int = 1
+    """Number of policy optimization steps per update iteration"""
     hjb_dynamic_threshold: float = 0.01
     """MSE threshold for dynamic model"""
     hjb_reward_threshold: float = 0.05
@@ -483,22 +485,21 @@ if __name__ == "__main__":
                 mb_obs = b_obs[mb_inds]
                 
                 # Policy update (actor)
-                compute_value_grad = grad(lambda x: agent.critic(x).squeeze())
+                for _ in range(args.hjb_policy_steps):
+                    compute_value_grad = grad(lambda x: agent.critic(x).squeeze())
+                    dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
 
-                
-                dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
+                    # Hamiltonian calculation
+                    current_actions = agent.actor(mb_obs)
+                    hamiltonian = reward_model(mb_obs, current_actions) + \
+                                torch.einsum("...i,...i->...", dVdx, dynamic_model(mb_obs, current_actions))
 
-                # Hamiltonian calculation
-                current_actions = agent.actor(mb_obs)
-                hamiltonian = reward_model(mb_obs, current_actions) + \
-                            torch.einsum("...i,...i->...", dVdx, dynamic_model(mb_obs, current_actions))
-
-                # Actor loss and update
-                actor_loss = -hamiltonian.mean()
-                actor_optimizer.zero_grad()
-                actor_loss.backward()
-                nn.utils.clip_grad_norm_(agent.actor.parameters(), args.max_grad_norm)
-                actor_optimizer.step()
+                    # Actor loss and update
+                    actor_loss = -hamiltonian.mean()
+                    actor_optimizer.zero_grad()
+                    actor_loss.backward()
+                    nn.utils.clip_grad_norm_(agent.actor.parameters(), args.max_grad_norm)
+                    actor_optimizer.step()
 
                 # Critic update - uses online networks only
                 current_v = agent.critic(mb_obs).squeeze()

@@ -505,12 +505,18 @@ if __name__ == "__main__":
                 # Critic update step
                 with torch.no_grad():  # Freeze policy for critic update
                     new_hamiltonian = hamiltonian.detach()
-                    
-                hjb_residuals = new_hamiltonian + current_V * np.log(args.gamma)
-                hjb_loss = 0.5*(hjb_residuals**2).mean()
-                v_loss = 0.5 * ((current_V.squeeze() - b_returns[mb_inds]) ** 2).mean()
+
+                # Recompute value without no_grad to track gradients
+                current_V_critic = agent.get_value(b_obs[mb_inds]).squeeze()
+
+                # Calculate HJB residuals using critic's current value estimates
+                hjb_residuals = new_hamiltonian + current_V_critic * torch.log(torch.tensor(args.gamma, device=device))
+                hjb_loss = 0.5 * (hjb_residuals ** 2).mean()
+
+                # Value loss using updated critic estimates
+                v_loss = 0.5 * ((current_V_critic - b_returns[mb_inds]) ** 2).mean()
                 critic_loss = v_loss * args.vf_coef + hjb_loss * args.hjb_coef
-                
+
                 critic_optimizer.zero_grad()
                 critic_loss.backward()
                 nn.utils.clip_grad_norm_(agent.critic.parameters(), args.max_grad_norm)

@@ -76,18 +76,10 @@ class Args:
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
-    clip_coef: float = 0.2
-    """the surrogate clipping coefficient"""
-    clip_vloss: bool = True
-    """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.0
-    """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
-    target_kl: float = None
-    """the target KL divergence threshold"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -151,36 +143,52 @@ class DynamicModel(nn.Module):
         return next_x[:, :obs.shape[1]]
 
 
+class Actor(nn.Module):
+    def __init__(self, env):
+        super().__init__()
+        self.fc1 = layer_init(nn.Linear(np.array(env.single_observation_space.shape).prod(), 256))
+        self.fc2 = layer_init(nn.Linear(256, 256))
+        self.fc_mu = layer_init(nn.Linear(256, np.prod(env.single_action_space.shape)), std=0.01)
+        
+        # Action scaling
+        self.register_buffer(
+            "action_scale",
+            torch.tensor(
+                (env.single_action_space.high - env.single_action_space.low) / 2.0,
+                dtype=torch.float32
+            )
+        )
+        self.register_buffer(
+            "action_bias",
+            torch.tensor(
+                (env.single_action_space.high + env.single_action_space.low) / 2.0,
+                dtype=torch.float32
+            )
+        )
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = torch.tanh(self.fc_mu(x))
+        return x * self.action_scale + self.action_bias
+
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(256, 256)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            layer_init(nn.Linear(256, 1), std=1.0),
         )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
-        )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        self.actor = Actor(envs)
     
     def get_value(self, x):
         return self.critic(x)
-
-    def get_action_and_value(self, x, action=None):
-        action_mean = self.actor_mean(x)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+    
+    def get_action(self, x):
+        return self.actor(x)
 
 
 class RewardModel(nn.Module):
@@ -254,11 +262,10 @@ if __name__ == "__main__":
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
-    logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    next_observations = torch.zeros_like(obs).to(device)  # Store next observations
+    next_observations = torch.zeros_like(obs).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -281,12 +288,17 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
-            # ALGO LOGIC: action logic
+            # Action selection with exploration noise
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
-                values[step] = value.flatten()
+                action = agent.get_action(next_obs)
+                # Add Gaussian noise for exploration
+                noise = torch.randn_like(action) * 0.1
+                action = torch.clamp(action + noise, 
+                                   torch.tensor(envs.single_action_space.low, device=device),
+                                   torch.tensor(envs.single_action_space.high, device=device))
+                values[step] = agent.get_value(next_obs).flatten()
+            
             actions[step] = action
-            logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
@@ -460,132 +472,44 @@ if __name__ == "__main__":
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
-        clipfracs = []
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
-                logratio = newlogprob - b_logprobs[mb_inds]
-                ratio = logratio.exp()
-
-                with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                    old_approx_kl = (-logratio).mean()
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
-
-                mb_advantages = b_advantages[mb_inds]
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-
-                # Policy loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-                # Value loss
-                newvalue = newvalue.view(-1)
-                if args.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -args.clip_coef,
-                        args.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-
-                # HJB residual term
-                with torch.set_grad_enabled(True):
-                    # 1. Get current observations and values
-                    obs_batch = b_obs[mb_inds].detach().requires_grad_(True)
-                    current_V = agent.get_value(obs_batch)
-                    
-                    # 2. Initialize action from policy network
-                    with torch.no_grad():
-                        a0, _, _, _ = agent.get_action_and_value(obs_batch)
-                    a_opt = torch.nn.Parameter(a0.clone(), requires_grad=True)
-
-                    # 2. Precompute value gradient
-                    compute_value_grad = grad(lambda x: agent.get_value(x).squeeze())
-                    dVdx = vmap(compute_value_grad, in_dims=(0))(obs_batch)
-
-                    # 3. Action optimization setup
-                    action_low = torch.tensor(envs.single_action_space.low, device=device)
-                    action_high = torch.tensor(envs.single_action_space.high, device=device)
-
-                    # Set models to evaluation mode before optimization
-                    dynamic_model.eval()
-                    reward_model.eval()
-
-                    action_optimizer = optim.AdamW([a_opt], lr=0.001)
-                    best_hamiltonian = float('inf')
-                    best_a_opt = a_opt.data.clone()
-                    no_improve = 0
-                    patience = 5  # Stop if no improvement for 3 consecutive steps
-
-                    for _ in range(args.hjb_opt_steps):
-                        action_optimizer.zero_grad()
-                        
-                        # Forward pass
-                        dx = dynamic_model(obs_batch, a_opt)
-                        r = reward_model(obs_batch, a_opt)
-                        hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
-                        loss_hamiltonian = -hamiltonian.mean()
-                        
-                        # Backward and optimize with retain_graph
-                        loss_hamiltonian.backward(retain_graph=True)
-                        action_optimizer.step()
-                        
-                        # Clamp to action space
-                        with torch.no_grad():
-                            a_opt.data = torch.clamp(a_opt.data, action_low, action_high)
-                        
-                        # Recompute loss with updated action for accurate tracking
-                        with torch.no_grad():
-                            dx_current = dynamic_model(obs_batch, a_opt)
-                            r_current = reward_model(obs_batch, a_opt)
-                            hamiltonian_current = r_current + torch.einsum("...i,...i->...", dVdx, dx_current)
-                            current_loss = -hamiltonian_current.mean().item()
-                        
-                        # Track best action and early stopping
-                        if current_loss < best_hamiltonian - 1e-5:
-                            best_hamiltonian = current_loss
-                            best_a_opt = a_opt.data.clone().detach()
-                            no_improve = 0
-                        else:
-                            no_improve += 1
-                            if no_improve >= patience:
-                                break
-
-                    # Restore training mode for models
-                    
-
-
-                    # 6. Final Hamiltonian calculation with best action
-                    with torch.no_grad():
-                        dx = dynamic_model(obs_batch, best_a_opt)
-                        r = reward_model(obs_batch, best_a_opt)
-                    hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
-                    hjb_residual = current_V * np.log(args.gamma) + hamiltonian
-                    hjb_loss = 0.5*(hjb_residual ** 2).mean()
-
-                entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + args.hjb_coef *hjb_loss
-
+                # Get current actions and values
+                a = agent.get_action(b_obs[mb_inds])
+                current_V = agent.get_value(b_obs[mb_inds])
+                
+                # Compute dynamics and reward
+                dx = dynamic_model(b_obs[mb_inds], a)
+                r = reward_model(b_obs[mb_inds], a)
+                
+                # Compute value gradient
+                compute_value_grad = grad(lambda x: agent.get_value(x).squeeze())
+                dVdx = vmap(compute_value_grad, in_dims=(0))(b_obs[mb_inds])
+                
+                # Hamiltonian calculation
+                hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
+                
+                # Losses
+                actor_loss = -hamiltonian.mean()
+                v_loss = 0.5 * ((current_V.squeeze() - b_returns[mb_inds]) ** 2).mean()
+                
+                # Combine losses
+                loss = actor_loss + v_loss * args.vf_coef
+                
+                # Optimization step
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
-            if args.target_kl is not None and approx_kl > args.target_kl:
-                break
+                # Logging
+                writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
+                writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+                writer.add_scalar("losses/hamiltonian_value", hamiltonian.mean().item(), global_step)
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
@@ -619,6 +543,7 @@ if __name__ == "__main__":
             Model=Agent,
             device=device,
             gamma=args.gamma,
+            use_deterministic=True
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)

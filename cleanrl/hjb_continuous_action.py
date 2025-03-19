@@ -43,15 +43,15 @@ class Args:
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
-    hjb_coef: float = 1.0
+    hjb_coef: float = 0.5
     """coefficient for HJB residual loss"""
-    hjb_policy_steps: int = 10
+    hjb_policy_steps: int = 2
     """Number of policy optimization steps per update iteration"""
     hjb_dynamic_threshold: float = 0.01
     """MSE threshold for dynamic model"""
     hjb_reward_threshold: float = 0.05
     """MSE threshold for reward model"""
-    hjb_dynamic_patience: int = 5
+    hjb_dynamic_patience: int = 500
     """Number of epochs to wait for improvement in dynamic model training"""
     hjb_dynamic_min_delta: float = 1e-5
     """Minimum improvement delta for early stopping in dynamic model training"""
@@ -64,7 +64,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 8
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -80,7 +80,7 @@ class Args:
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
-    vf_coef: float = 0.5
+    vf_coef: float = 0.0
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
@@ -105,9 +105,9 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
         env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -1, 1))
+        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -1, 1))
+        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
 
     return thunk
@@ -143,7 +143,7 @@ class DynamicModel(nn.Module):
         
     def forward(self, obs, action):
         x = torch.cat([obs, action], dim=1)
-        next_x = odeint(self.ode_func, x, torch.tensor([0.0, self.dt],).to(x.device), method='euler', options=dict(step_size=self.dt/5))[-1]
+        next_x = odeint(self.ode_func, x, torch.tensor([0.0, self.dt],).to(x.device), method='rk4', options=dict(step_size=self.dt/5))[-1]
         return next_x[:, :obs.shape[1]]
 
 
@@ -501,7 +501,7 @@ if __name__ == "__main__":
                     actor_optimizer.zero_grad()
                     actor_loss.backward()
                     nn.utils.clip_grad_norm_(agent.actor.parameters(), args.max_grad_norm)
-                    actor_optimizer.step()
+                    actor_optimizer.step() #implement projected gradient descent, to be sure that action
 
                 # Critic update - uses online networks only
                 current_v = agent.critic(mb_obs).squeeze()

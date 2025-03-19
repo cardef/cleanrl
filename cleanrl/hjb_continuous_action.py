@@ -527,7 +527,7 @@ if __name__ == "__main__":
                 current_v = agent.critic(mb_obs).squeeze()
                 
                 # HJB residual calculation
-                hjb_residual = target_hamiltonian + target_v * torch.log(torch.tensor(args.gamma, device=device))
+                hjb_residual = target_hamiltonian + target_v * torch.log(torch.tensor(args.gamma, device=device)) #all of terms here are detached, it's useless to improve critic ai!
                 hjb_loss = 0.5 * (hjb_residual ** 2).mean()
                 
                 # Value loss

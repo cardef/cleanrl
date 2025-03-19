@@ -493,50 +493,54 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                # Get current actions and values
-                with torch.no_grad():    
-                    current_V = agent.get_value(b_obs[mb_inds])
-                a = agent.get_action(b_obs[mb_inds])
-                # Compute dynamics and reward
-                dx = dynamic_model(b_obs[mb_inds], a)
-                r = reward_model(b_obs[mb_inds], a)
+                # Get current observations
+                mb_obs = b_obs[mb_inds]
                 
-                # Compute value gradient using target critic
+                # Policy update (actor) - only uses online networks
                 with torch.no_grad():
+                    # Compute target network outputs for gradient calculation
                     compute_value_grad = grad(lambda x: agent.target_critic(x).squeeze())
-                    dVdx = vmap(compute_value_grad, in_dims=(0))(b_obs[mb_inds])
+                    dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
+                    dVdx = dVdx.detach()
+
+                # Use online actor for action selection
+                current_actions = agent.actor(mb_obs)
                 
                 # Hamiltonian calculation
-                hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
-                
-                # Policy update step
+                hamiltonian = reward_model(mb_obs, current_actions) + \
+                            torch.einsum("...i,...i->...", dVdx, dynamic_model(mb_obs, current_actions))
+
+                # Actor loss and update
                 actor_loss = -hamiltonian.mean()
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(agent.actor.parameters(), args.max_grad_norm)
                 actor_optimizer.step()
 
-                # Critic update step
-                with torch.no_grad():  # Freeze policy for critic update
-                    new_hamiltonian = hamiltonian.detach() #you have
+                # Critic update - uses both online and target networks
+                with torch.no_grad():
+                    # Compute target values
+                    target_v = agent.target_critic(mb_obs).squeeze()
+                    target_hamiltonian = hamiltonian.detach()
 
-                # Recompute value without no_grad to track gradients
-                current_V_critic = agent.get_value(b_obs[mb_inds]).squeeze()
-
-                # Calculate HJB residuals using critic's current value estimates
-                hjb_residuals = new_hamiltonian + current_V_critic * torch.log(torch.tensor(args.gamma, device=device))
-                hjb_loss = 0.5 * (hjb_residuals ** 2).mean()
-
-                # Value loss using updated critic estimates
-                v_loss = 0.5 * ((current_V_critic - b_returns[mb_inds]) ** 2).mean()
+                # Online critic predictions
+                current_v = agent.critic(mb_obs).squeeze()
+                
+                # HJB residual calculation
+                hjb_residual = target_hamiltonian + target_v * torch.log(torch.tensor(args.gamma, device=device))
+                hjb_loss = 0.5 * (hjb_residual ** 2).mean()
+                
+                # Value loss
+                v_loss = 0.5 * ((current_v - b_returns[mb_inds]) ** 2).mean()
                 critic_loss = v_loss * args.vf_coef + hjb_loss * args.hjb_coef
 
+                # Critic update
                 critic_optimizer.zero_grad()
                 critic_loss.backward()
                 nn.utils.clip_grad_norm_(agent.critic.parameters(), args.max_grad_norm)
                 critic_optimizer.step()
 
-                # Update target networks
+                # Polyak averaging for target networks
                 with torch.no_grad():
                     # Update critic target
                     for param, target_param in zip(agent.critic.parameters(), agent.target_critic.parameters()):

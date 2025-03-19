@@ -45,9 +45,7 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
     hjb_coef: float = 1.0
     """coefficient for HJB residual loss"""
-    hjb_opt_steps: int = 10
-    """number of optimization steps for action"""
-    hjb_policy_steps: int = 1
+    hjb_policy_steps: int = 10
     """Number of policy optimization steps per update iteration"""
     hjb_dynamic_threshold: float = 0.01
     """MSE threshold for dynamic model"""
@@ -141,7 +139,7 @@ class DynamicModel(nn.Module):
         
     def forward(self, obs, action):
         x = torch.cat([obs, action], dim=1)
-        next_x = odeint(self.ode_func, x, torch.tensor([0.0, self.dt],).to(x.device), method='rk4', options=dict(step_size=self.dt/5))[-1]
+        next_x = odeint(self.ode_func, x, torch.tensor([0.0, self.dt],).to(x.device), method='euler', options=dict(step_size=self.dt/5))[-1]
         return next_x[:, :obs.shape[1]]
 
 
@@ -359,7 +357,7 @@ if __name__ == "__main__":
 
         best_val_mse = float('inf')
         patience_counter = 0
-        patience, min_delta = 5, 1e-5  # Wait 5 epochs for >0.00001 improvement
+        patience, min_delta = 20, 1e-5  # Wait 5 epochs for >0.00001 improvement #they should be args ai!
         for pretrain_epoch in trange(5000, desc="Pretraining"):
             if mask.sum() == 0:
                 break  # Skip if no valid data

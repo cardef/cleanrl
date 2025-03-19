@@ -22,6 +22,8 @@ from tqdm import trange
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
+    tau: float = 0.005
+    """Polyak averaging coefficient for target networks"""
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -183,6 +185,18 @@ class Agent(nn.Module):
             layer_init(nn.Linear(256, 1), std=1.0),
         )
         self.actor = Actor(envs)
+        # Target networks
+        self.target_critic = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+            nn.Tanh(),
+            layer_init(nn.Linear(256, 256)),
+            nn.Tanh(),
+            layer_init(nn.Linear(256, 1), std=1.0),
+        )
+        self.target_actor = Actor(envs)
+        # Initialize targets with same weights
+        self.target_critic.load_state_dict(self.critic.state_dict())
+        self.target_actor.load_state_dict(self.actor.state_dict())
     
     def get_value(self, x):
         return self.critic(x)
@@ -451,7 +465,7 @@ if __name__ == "__main__":
 
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            next_value = agent.target_critic(next_obs).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -460,7 +474,7 @@ if __name__ == "__main__":
                     nextvalues = next_value
                 else:
                     nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = values[t + 1]
+                    nextvalues = agent.target_critic(obs[t + 1]).reshape(1, -1)
                 delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
@@ -488,9 +502,10 @@ if __name__ == "__main__":
                 dx = dynamic_model(b_obs[mb_inds], a)
                 r = reward_model(b_obs[mb_inds], a)
                 
-                # Compute value gradient
-                compute_value_grad = grad(lambda x: agent.get_value(x).squeeze())
-                dVdx = vmap(compute_value_grad, in_dims=(0))(b_obs[mb_inds])
+                # Compute value gradient using target critic
+                with torch.no_grad():
+                    compute_value_grad = grad(lambda x: agent.target_critic(x).squeeze())
+                    dVdx = vmap(compute_value_grad, in_dims=(0))(b_obs[mb_inds])
                 
                 # Hamiltonian calculation
                 hamiltonian = r + torch.einsum("...i,...i->...", dVdx, dx)
@@ -521,6 +536,17 @@ if __name__ == "__main__":
                 critic_loss.backward()
                 nn.utils.clip_grad_norm_(agent.critic.parameters(), args.max_grad_norm)
                 critic_optimizer.step()
+
+                # Update target networks
+                with torch.no_grad():
+                    # Update critic target
+                    for param, target_param in zip(agent.critic.parameters(), agent.target_critic.parameters()):
+                        target_param.data.mul_(1 - args.tau)
+                        target_param.data.add_(args.tau * param.data)
+                    # Update actor target
+                    for param, target_param in zip(agent.actor.parameters(), agent.target_actor.parameters()):
+                        target_param.data.mul_(1 - args.tau)
+                        target_param.data.add_(args.tau * param.data)
 
                 # Logging
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)

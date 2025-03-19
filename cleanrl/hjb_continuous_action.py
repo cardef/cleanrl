@@ -506,7 +506,7 @@ if __name__ == "__main__":
                 with torch.no_grad():  # Freeze policy for critic update
                     new_hamiltonian = hamiltonian.detach()
                     
-                hjb_residuals = new_hamiltonian + current_V * torch.log(args.gamma)
+                hjb_residuals = new_hamiltonian + current_V * np.log(args.gamma)
                 hjb_loss = 0.5*(hjb_residuals**2).mean()
                 v_loss = 0.5 * ((current_V.squeeze() - b_returns[mb_inds]) ** 2).mean()
                 critic_loss = v_loss * args.vf_coef + hjb_loss * args.hjb_coef

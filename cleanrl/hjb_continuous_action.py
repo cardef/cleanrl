@@ -51,6 +51,10 @@ class Args:
     """MSE threshold for dynamic model"""
     hjb_reward_threshold: float = 0.05
     """MSE threshold for reward model"""
+    hjb_dynamic_patience: int = 5
+    """Number of epochs to wait for improvement in dynamic model training"""
+    hjb_dynamic_min_delta: float = 1e-5
+    """Minimum improvement delta for early stopping in dynamic model training"""
     
 
     # Algorithm specific arguments
@@ -357,7 +361,7 @@ if __name__ == "__main__":
 
         best_val_mse = float('inf')
         patience_counter = 0
-        patience, min_delta = 20, 1e-5  # Wait 5 epochs for >0.00001 improvement #they should be args ai!
+        patience, min_delta = args.hjb_dynamic_patience, args.hjb_dynamic_min_delta
         for pretrain_epoch in trange(5000, desc="Pretraining"):
             if mask.sum() == 0:
                 break  # Skip if no valid data

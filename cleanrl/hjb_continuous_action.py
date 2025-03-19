@@ -506,7 +506,7 @@ if __name__ == "__main__":
                     next_state_pred = dynamic_model(mb_obs, current_actions)
                     next_v = agent.critic(next_state_pred).squeeze()
 
-                hjb_residual = hamiltonian.detach() + (args.gamma * next_v - current_v)
+                hjb_residual = hamiltonian.detach() + (args.gamma * next_v - current_v) #you fucking idiot, you disrupt my formula. restore it, now ai!
                 hjb_loss = 0.5 * (hjb_residual ** 2).mean()
 
                 # Value loss

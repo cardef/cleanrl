@@ -484,6 +484,8 @@ if __name__ == "__main__":
                 
                 # Policy update (actor)
                 compute_value_grad = grad(lambda x: agent.critic(x).squeeze())
+
+                
                 dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
 
                 # Hamiltonian calculation
@@ -500,13 +502,13 @@ if __name__ == "__main__":
 
                 # Critic update - uses online networks only
                 current_v = agent.critic(mb_obs).squeeze()
-
-                # HJB residual calculation
+                dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
                 with torch.no_grad():
-                    next_state_pred = dynamic_model(mb_obs, current_actions)
-                    next_v = agent.critic(next_state_pred).squeeze()
-
-                hjb_residual = hamiltonian.detach() + (torch.log(torch.tensor(args.gamma, device=device)) * next_v - current_v)
+                    current_actions = agent.actor(mb_obs)
+                    r = reward_model(mb_obs, current_actions)
+                    f = dynamic_model(mb_obs, current_actions)
+                hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
+                hjb_residual = hamiltonian + np.log(args.gamma)*current_v
                 hjb_loss = 0.5 * (hjb_residual ** 2).mean()
 
                 # Value loss

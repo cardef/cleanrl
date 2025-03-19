@@ -482,17 +482,12 @@ if __name__ == "__main__":
                 # Get current observations
                 mb_obs = b_obs[mb_inds]
                 
-                # Policy update (actor) - only uses online networks
-                with torch.no_grad():
-                    # Compute network outputs for gradient calculation
-                    compute_value_grad = grad(lambda x: agent.critic(x).squeeze())
-                    dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
-                    dVdx = dVdx.detach()
+                # Policy update (actor)
+                compute_value_grad = grad(lambda x: agent.critic(x).squeeze())
+                dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
 
-                # Use online actor for action selection
-                current_actions = agent.actor(mb_obs)
-                
                 # Hamiltonian calculation
+                current_actions = agent.actor(mb_obs)
                 hamiltonian = reward_model(mb_obs, current_actions) + \
                             torch.einsum("...i,...i->...", dVdx, dynamic_model(mb_obs, current_actions))
 
@@ -503,19 +498,17 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(agent.actor.parameters(), args.max_grad_norm)
                 actor_optimizer.step()
 
-                # Critic update - uses both online and target networks
-                with torch.no_grad():
-                    # Compute target values
-                    target_v = agent.target_critic(mb_obs).squeeze()
-                    target_hamiltonian = hamiltonian.detach()
-
-                # Online critic predictions
+                # Critic update - uses online networks only
                 current_v = agent.critic(mb_obs).squeeze()
-                
+
                 # HJB residual calculation
-                hjb_residual = target_hamiltonian + target_v * torch.log(torch.tensor(args.gamma, device=device))
+                with torch.no_grad():
+                    next_state_pred = dynamic_model(mb_obs, current_actions)
+                    next_v = agent.critic(next_state_pred).squeeze()
+
+                hjb_residual = hamiltonian.detach() + (args.gamma * next_v - current_v)
                 hjb_loss = 0.5 * (hjb_residual ** 2).mean()
-                
+
                 # Value loss
                 v_loss = 0.5 * ((current_v - b_returns[mb_inds]) ** 2).mean()
                 critic_loss = v_loss * args.vf_coef + hjb_loss * args.hjb_coef

@@ -412,6 +412,7 @@ if __name__ == "__main__":
 
             for pretrain_epoch in trange(5000, desc="Pretraining"):
                 if len(train_obs) == 0:
+                    print("exit")
                     break  # No training data available
                 
                 # Random batch of trajectories

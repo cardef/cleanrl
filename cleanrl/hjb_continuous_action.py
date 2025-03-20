@@ -141,8 +141,6 @@ class ODEFunc(nn.Module):
         idx = torch.clamp((t / self.dt).long(), 0, a_sequence.size(1)-1)
         a = a_sequence[torch.arange(x.size(0)), idx].unsqueeze(-1) if a_sequence.dim() == 2 else a_sequence[torch.arange(x.size(0)), idx]
         
-        assert a.shape == (x.shape[0], self.action_dim), \
-            f"Action shape mismatch: {a.shape} vs expected ({x.shape[0]}, {self.action_dim})"
         
         output = self.net(torch.cat([x, a], dim=-1))
         assert output.shape == x.shape, \

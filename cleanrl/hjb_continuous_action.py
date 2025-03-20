@@ -501,121 +501,108 @@ if __name__ == "__main__":
                 best_val_mse = float('inf')
                 patience_counter = 0
             
-            for pretrain_epoch in trange(5000, desc="Pretraining"):
-                # Randomly sample a trajectory
-                traj_idx = random.randint(0, len(train_obs)-1)
+            print("Pretraining dynamic model on full dataset...")
+            best_val_mse = float('inf')
+            patience_counter = 0
+
+            # Reduce number of epochs since we're using full dataset each time
+            for pretrain_epoch in trange(100, desc="Dynamic Pretraining"):
+                epoch_loss = 0.0
+                total_steps = 0
                 
-                # Get trajectory data
-                traj_obs = train_obs[traj_idx]
-                traj_actions = train_actions[traj_idx]
-                traj_next_obs = train_next_obs[traj_idx]
-                traj_mask = train_masks[traj_idx]
+                # Shuffle training trajectories each epoch
+                traj_order = torch.randperm(len(train_obs))
                 
-                # Forward pass
+                dynamic_model.train()
                 dynamic_optimizer.zero_grad()
-                try:
-                    pred_traj = dynamic_model(
-                        traj_obs[0].unsqueeze(0),  # (1, obs_dim)
-                        traj_actions.unsqueeze(0)  # (1, traj_length, action_dim)
-                    )  # output shape: (1, traj_length, obs_dim)
-                except Exception as e:
-                    print(f"Dynamic model forward failed: {e}")
-                    writer.add_scalar("dynamic/training_failed", 1, pretrain_epoch)
-                    continue
-
-                # Calculate masked loss
-                valid_steps = traj_mask.sum().item()
-                if valid_steps == 0:
-                    writer.add_scalar("dynamic/skipped_empty_trajectory", 1, pretrain_epoch)
-                    continue
+                
+                for traj_idx in traj_order:
+                    traj_obs = train_obs[traj_idx]
+                    traj_actions = train_actions[traj_idx]
+                    traj_next_obs = train_next_obs[traj_idx]
+                    traj_mask = train_masks[traj_idx]
                     
-                loss = nn.MSELoss()(
-                    pred_traj[0, :len(traj_obs)-1][traj_mask[:-1]],
-                    traj_next_obs[:-1][traj_mask[:-1]]
-                )
-                
-                # Add gradient logging
-                writer.add_scalar("dynamic/train_loss", loss.item(), pretrain_epoch)
-                loss.backward()
-                
-                # Log gradient statistics
-                total_grad_norm = torch.nn.utils.clip_grad_norm_(dynamic_model.parameters(), args.max_grad_norm)
-                writer.add_scalar("dynamic/grad_norm", total_grad_norm.item(), pretrain_epoch)
-                writer.add_scalar("dynamic/grad_max", 
-                                 max([p.grad.abs().max().item() for p in dynamic_model.parameters() if p.grad is not None]), 
-                                 pretrain_epoch)
-                
-                dynamic_optimizer.step()
-
-                # Validation
-                with torch.no_grad():
-                    if len(val_traj_indices) > 0:
-                        val_traj_idx = random.randint(0, len(val_obs)-1)
-                        val_obs_traj = val_obs[val_traj_idx]
-                        val_actions_traj = val_actions[val_traj_idx]
-                        val_next_obs_traj = val_next_obs[val_traj_idx]
-                        val_mask_traj = val_masks[val_traj_idx]
+                    # Skip invalid trajectories
+                    if len(traj_obs) < 2 or traj_mask.sum() == 0:
+                        continue
                         
-                        try:
-                            val_pred = dynamic_model(val_obs_traj[0].unsqueeze(0), val_actions_traj.unsqueeze(0))
-                        except Exception as e:
-                            print(f"Dynamic model validation failed: {e}")
-                            writer.add_scalar("dynamic/validation_failed", 1, pretrain_epoch)
-                            val_mse = float('inf')
-                            val_r2 = -1.0
+                    # Forward pass
+                    pred_traj = dynamic_model(
+                        traj_obs[0].unsqueeze(0),
+                        traj_actions.unsqueeze(0)
+                    )
+                    
+                    # Calculate masked loss
+                    valid_steps = traj_mask[:-1].sum().item()
+                    if valid_steps == 0:
+                        continue
+                        
+                    loss = nn.MSELoss()(
+                        pred_traj[0, :len(traj_obs)-1][traj_mask[:-1]],
+                        traj_next_obs[:-1][traj_mask[:-1]]
+                    )
+                    
+                    # Scale loss by trajectory length and accumulate gradients
+                    (loss * valid_steps).backward()
+                    epoch_loss += loss.item() * valid_steps
+                    total_steps += valid_steps
+                
+                if total_steps > 0:
+                    # Average gradients and update
+                    for param in dynamic_model.parameters():
+                        if param.grad is not None:
+                            param.grad /= total_steps
+                    torch.nn.utils.clip_grad_norm_(dynamic_model.parameters(), args.max_grad_norm)
+                    dynamic_optimizer.step()
+                    dynamic_optimizer.zero_grad()
+                    
+                    # Log training metrics
+                    avg_epoch_loss = epoch_loss / total_steps
+                    writer.add_scalar("dynamic/train_loss", avg_epoch_loss, pretrain_epoch)
+                
+                # Full validation pass
+                dynamic_model.eval()
+                with torch.no_grad():
+                    val_loss_sum = 0.0
+                    val_steps_total = 0
+                    for val_idx in range(len(val_obs)):
+                        val_obs_traj = val_obs[val_idx]
+                        val_actions_traj = val_actions[val_idx]
+                        val_next_obs_traj = val_next_obs[val_idx]
+                        val_mask_traj = val_masks[val_idx]
+                        
+                        if len(val_obs_traj) < 2 or val_mask_traj.sum() == 0:
+                            continue
+                            
+                        val_pred = dynamic_model(
+                            val_obs_traj[0].unsqueeze(0),
+                            val_actions_traj.unsqueeze(0)
+                        )
+                        
+                        valid_steps = val_mask_traj[:-1].sum().item()
+                        if valid_steps > 0:
+                            pred_slice = val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]]
+                            true_slice = val_next_obs_traj[:-1][val_mask_traj[:-1]]
+                            
+                            val_loss = nn.MSELoss()(pred_slice, true_slice).item()
+                            val_loss_sum += val_loss * valid_steps
+                            val_steps_total += valid_steps
+                    
+                    if val_steps_total > 0:
+                        val_mse = val_loss_sum / val_steps_total
+                        writer.add_scalar("dynamic/val_mse", val_mse, pretrain_epoch)
+                        
+                        # Early stopping
+                        if val_mse < (best_val_mse - args.hjb_dynamic_min_delta):
+                            best_val_mse = val_mse
+                            patience_counter = 0
                         else:
-                            val_steps = val_mask_traj.sum().item()
-                            if val_steps > 0 and not torch.isnan(val_pred).any():
-                                pred_slice = val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]]
-                                true_slice = val_next_obs_traj[:-1][val_mask_traj[:-1]]
-                                
-                                # Detailed prediction statistics with empty tensor check
-                                if pred_slice.numel() > 0:
-                                    writer.add_scalar("debug/pred_max", pred_slice.max().item(), pretrain_epoch)
-                                    writer.add_scalar("debug/pred_min", pred_slice.min().item(), pretrain_epoch)
-                                    writer.add_scalar("debug/pred_mean", pred_slice.mean().item(), pretrain_epoch)
-                                    writer.add_scalar("debug/true_max", true_slice.max().item(), pretrain_epoch)
-                                    writer.add_scalar("debug/true_min", true_slice.min().item(), pretrain_epoch)
-                                else:
-                                    # Log NaN when slices are empty
-                                    writer.add_scalar("debug/pred_max", float('nan'), pretrain_epoch)
-                                    writer.add_scalar("debug/pred_min", float('nan'), pretrain_epoch)
-                                    writer.add_scalar("debug/pred_mean", float('nan'), pretrain_epoch)
-                                    writer.add_scalar("debug/true_max", float('nan'), pretrain_epoch)
-                                    writer.add_scalar("debug/true_min", float('nan'), pretrain_epoch)
-                                
-                                val_loss = nn.MSELoss()(pred_slice, true_slice).item()
-                                val_mse = val_loss / val_steps
-                                
-                                # R² calculation with checks
-                                if true_slice.var() > 1e-8:
-                                    val_r2 = r2_score(true_slice.cpu().numpy(), pred_slice.cpu().numpy())
-                                else:
-                                    val_r2 = -1.0
-                            else:
-                                val_mse = float('inf')
-                                val_r2 = -1.0
-                                if torch.isnan(val_pred).any():
-                                    writer.add_scalar("dynamic/val_nan_predictions", 1, pretrain_epoch)
+                            patience_counter += 1
+                            if patience_counter >= args.hjb_dynamic_patience:
+                                print(f"Early stopping at epoch {pretrain_epoch}")
+                                break
                     else:
                         val_mse = float('inf')
-                        val_r2 = -1.0
-
-                    writer.add_scalar("dynamic/val_mse", val_mse, pretrain_epoch)
-                    writer.add_scalar("dynamic/val_r2", val_r2, pretrain_epoch)
-                    writer.add_scalar("dynamic/val_steps", val_steps if val_steps > 0 else 0, pretrain_epoch)
-
-                # Early stopping logic
-                if val_mse < (best_val_mse - args.hjb_dynamic_min_delta):
-                    best_val_mse = val_mse
-                    patience_counter = 0
-                    writer.add_scalar("dynamic/best_val_mse", best_val_mse, pretrain_epoch)
-                else:
-                    patience_counter += 1
-                    writer.add_scalar("dynamic/patience_counter", patience_counter, pretrain_epoch)
-                    if patience_counter >= args.hjb_dynamic_patience:
-                        writer.add_scalar("dynamic/early_stopping", 1, pretrain_epoch)
-                        break
 
             print(f"Dynamic model training completed. Best validation MSE: {best_val_mse:.4f}")
 

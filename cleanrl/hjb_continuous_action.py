@@ -66,7 +66,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 4096
+    num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -120,47 +120,45 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class ODEFunc(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.SiLU(),
-            nn.Linear(64, 64),
-            nn.SiLU(),
-            nn.Linear(64, 64),
-            nn.SiLU(),
-            nn.Linear(64, input_dim),
+            nn.Linear(obs_dim + action_dim, 16),
+            nn.Softplus(),
+            nn.Linear(16, 16),
+            nn.Softplus(),
+            nn.Linear(16, obs_dim),
         )
         
-    def forward(self, t, x):
-        return self.net(x)
+    def forward(self, t, x, a):
+        
+        return self.net(torch.cat([x,a], dim=-1))
 
 class DynamicModel(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
-        self.ode_func = ODEFunc(obs_dim + action_dim)
+        self.ode_func = ODEFunc(obs_dim, action_dim)
         self.dt = 0.05  # Should match environment timestep
         
         # TorchODE components
-        self.term = to.ODETerm(self.ode_func)
-        self.step_method = to.Kutta4(term=self.term)
-        self.step_size_controller = to.FixedStepController()
+        self.term = to.ODETerm(self.ode_func, with_args=True)
+        self.step_method = to.Tsit5(term=self.term)
+        self.step_size_controller = to.IntegralController(atol=1e-6, rtol=1e-3, term=self.term)
         self.adjoint = to.AutoDiffAdjoint(
-            self.step_method,
-            self.step_size_controller
+            step_method=self.step_method,
+            step_size_controller=self.step_size_controller,
         )
 
     def forward(self, obs, action):
-        x = torch.cat([obs, action], dim=1)
-        batch_size = x.size(0)
+        batch_size = obs.size(0)
         
         # Create time evaluation points for each batch element
-        problem = to.InitialValueProblem(y0=x, t_span=(0.0, self.dt))
-        sol = self.adjoint.solve(problem, step_size=self.dt/5)
+        problem = to.InitialValueProblem(y0=obs, t_eval=torch.tensor([0.0, self.dt]).repeat(batch_size,1))
+        sol = self.adjoint.solve(problem, args=action)
         
         # Extract final state and return observation portion
         next_x = sol.ys[:, -1, :]  # Shape: [batch_size, obs_dim + action_dim]
-        return next_x[:, :obs.shape[1]]
+        return next_x
 
 
 class Actor(nn.Module):

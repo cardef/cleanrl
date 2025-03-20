@@ -441,13 +441,22 @@ if __name__ == "__main__":
                                 val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]],
                                 val_next_obs_traj[:-1][val_mask_traj[:-1]]
                             ).item() * val_steps
-                            initial_val_r2 = r2_score(trues, preds)
-                            writer.add_scalar("dynamic/initial_val_r2", initial_val_r2, iteration)
+                            
+                            # Add check for R² calculation
+                            if len(preds) > 0 and len(trues) > 0:
+                                initial_val_r2 = r2_score(trues, preds)
+                                writer.add_scalar("dynamic/initial_val_r2", initial_val_r2, iteration)
+                            else:
+                                initial_val_r2 = -1.0  # Indicate invalid value
+                            
                             initial_val_steps += val_steps
                     
                     if initial_val_steps > 0:
                         initial_val_mse = initial_val_loss / initial_val_steps
                         writer.add_scalar("dynamic/initial_val_mse", initial_val_mse, iteration)
+                    else:
+                        initial_val_mse = float('inf')
+                        print("No valid validation samples found for dynamic model")
 
             # Check if dynamic model is already good enough
             if len(val_traj_indices) > 0 and initial_val_steps > 0 and initial_val_mse <= args.hjb_dynamic_threshold:

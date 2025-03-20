@@ -415,6 +415,14 @@ if __name__ == "__main__":
         train_obs, train_actions, train_next_obs, train_masks = prepare_trajectory_data(train_traj_indices)
         val_obs, val_actions, val_next_obs, val_masks = prepare_trajectory_data(val_traj_indices)
 
+        # Log buffer statistics
+        writer.add_scalar("buffer/obs_mean", obs.mean().item(), global_step)
+        writer.add_scalar("buffer/obs_std", obs.std().item(), global_step)
+        writer.add_scalar("buffer/next_obs_mean", next_observations.mean().item(), global_step)
+        writer.add_scalar("buffer/next_obs_std", next_observations.std().item(), global_step)
+        writer.add_scalar("buffer/actions_mean", actions.mean().item(), global_step)
+        writer.add_scalar("buffer/actions_std", actions.std().item(), global_step)
+
         # Dynamic model evaluation check
         if len(trajectories) == 0:
             print("No trajectories found for training!")

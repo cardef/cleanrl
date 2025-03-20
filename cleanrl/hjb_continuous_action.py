@@ -64,9 +64,9 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 8
+    num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 4096
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -123,13 +123,13 @@ class ODEFunc(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
         self.net = nn.Sequential(
-            layer_init(nn.Linear(input_dim, 256)),
+            nn.Linear(input_dim, 64),
             nn.SiLU(),
-            layer_init(nn.Linear(256, 256)),
+            nn.Linear(64, 64),
             nn.SiLU(),
-            layer_init(nn.Linear(256, 256)),
+            nn.Linear(64, 64),
             nn.SiLU(),
-            layer_init(nn.Linear(256, input_dim)),
+            nn.Linear(64, input_dim),
         )
         
     def forward(self, t, x):

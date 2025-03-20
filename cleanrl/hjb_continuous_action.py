@@ -534,12 +534,20 @@ if __name__ == "__main__":
                                 pred_slice = val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]]
                                 true_slice = val_next_obs_traj[:-1][val_mask_traj[:-1]]
                                 
-                                # Detailed prediction statistics
-                                writer.add_scalar("debug/pred_max", pred_slice.max().item(), pretrain_epoch)
-                                writer.add_scalar("debug/pred_min", pred_slice.min().item(), pretrain_epoch)
-                                writer.add_scalar("debug/pred_mean", pred_slice.mean().item(), pretrain_epoch)
-                                writer.add_scalar("debug/true_max", true_slice.max().item(), pretrain_epoch)
-                                writer.add_scalar("debug/true_min", true_slice.min().item(), pretrain_epoch)
+                                # Detailed prediction statistics with empty tensor check
+                                if pred_slice.numel() > 0:
+                                    writer.add_scalar("debug/pred_max", pred_slice.max().item(), pretrain_epoch)
+                                    writer.add_scalar("debug/pred_min", pred_slice.min().item(), pretrain_epoch)
+                                    writer.add_scalar("debug/pred_mean", pred_slice.mean().item(), pretrain_epoch)
+                                    writer.add_scalar("debug/true_max", true_slice.max().item(), pretrain_epoch)
+                                    writer.add_scalar("debug/true_min", true_slice.min().item(), pretrain_epoch)
+                                else:
+                                    # Log NaN when slices are empty
+                                    writer.add_scalar("debug/pred_max", float('nan'), pretrain_epoch)
+                                    writer.add_scalar("debug/pred_min", float('nan'), pretrain_epoch)
+                                    writer.add_scalar("debug/pred_mean", float('nan'), pretrain_epoch)
+                                    writer.add_scalar("debug/true_max", float('nan'), pretrain_epoch)
+                                    writer.add_scalar("debug/true_min", float('nan'), pretrain_epoch)
                                 
                                 val_loss = nn.MSELoss()(pred_slice, true_slice).item()
                                 val_mse = val_loss / val_steps

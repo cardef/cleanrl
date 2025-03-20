@@ -134,7 +134,8 @@ class ODEFunc(nn.Module):
     def forward(self, t, x, a_sequence):
         # Calculate which action to use based on current time
         idx = torch.clamp((t / self.dt).long(), 0, a_sequence.size(1)-1)
-        a = a_sequence[torch.arange(x.size(0)), idx]
+        # Ensure action has correct dimensionality
+        a = a_sequence[torch.arange(x.size(0)), idx].unsqueeze(-1) if a_sequence.dim() == 2 else a_sequence[torch.arange(x.size(0)), idx]
         return self.net(torch.cat([x, a], dim=-1))
 
 class DynamicModel(nn.Module):

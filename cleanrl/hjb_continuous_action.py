@@ -123,11 +123,13 @@ class ODEFunc(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, 64),
+            nn.Linear(obs_dim + action_dim, 256),
             nn.Softplus(),
-            nn.Linear(64, 64),
+            nn.Linear(256, 256),
             nn.Softplus(),
-            nn.Linear(64, obs_dim),
+            nn.Linear(256, 256),
+            nn.Softplus(),
+            nn.Linear(256, obs_dim),
         )
         self.dt = 0.05  # Should match environment timestep
 

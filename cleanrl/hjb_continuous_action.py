@@ -45,7 +45,7 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
     hjb_coef: float = 0.5
     """coefficient for HJB residual loss"""
-    hjb_policy_steps: int = 2
+    hjb_policy_steps: int = 1
     """Number of policy optimization steps per update iteration"""
     hjb_dynamic_threshold: float = 0.01
     """MSE threshold for dynamic model"""

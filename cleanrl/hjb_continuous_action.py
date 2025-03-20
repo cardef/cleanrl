@@ -351,7 +351,6 @@ if __name__ == "__main__":
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-        #log obs, next_obs, actions mean and std ai!
         # 1. Identify complete trajectories across all environments
         trajectories = []
         current_start = 0

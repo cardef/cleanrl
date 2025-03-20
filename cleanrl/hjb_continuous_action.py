@@ -421,6 +421,30 @@ if __name__ == "__main__":
         else:
             print(f"Training on {len(train_traj_indices)} trajectories, validating on {len(val_traj_indices)}")
             
+            # Calculate initial validation metrics
+            if len(val_traj_indices) > 0:
+                with torch.no_grad():
+                    initial_val_loss = 0
+                    initial_val_steps = 0
+                    for traj in val_traj_indices:
+                        val_obs_traj = val_obs[traj]
+                        val_actions_traj = val_actions[traj]
+                        val_next_obs_traj = val_next_obs[traj]
+                        val_mask_traj = val_masks[traj]
+                        
+                        val_pred = dynamic_model(val_obs_traj[0].unsqueeze(0), val_actions_traj.unsqueeze(0))
+                        val_steps = val_mask_traj.sum().item()
+                        if val_steps > 0:
+                            initial_val_loss += nn.MSELoss()(
+                                val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]],
+                                val_next_obs_traj[:-1][val_mask_traj[:-1]]
+                            ).item() * val_steps
+                            initial_val_steps += val_steps
+                    
+                    if initial_val_steps > 0:
+                        initial_val_mse = initial_val_loss / initial_val_steps
+                        writer.add_scalar("dynamic/initial_val_mse", initial_val_mse, iteration)
+            
             best_val_mse = float('inf')
             patience_counter = 0
             
@@ -447,6 +471,7 @@ if __name__ == "__main__":
                     pred_traj[0, :len(traj_obs)-1][traj_mask[:-1]],
                     traj_next_obs[:-1][traj_mask[:-1]]
                 )
+                writer.add_scalar("dynamic/train_loss", loss.item(), pretrain_epoch)
                 loss.backward()
                 dynamic_optimizer.step()
 
@@ -467,6 +492,8 @@ if __name__ == "__main__":
                                 val_next_obs_traj[:-1][val_mask_traj[:-1]]
                             ).item()
                             val_mse = val_loss / val_steps
+                            writer.add_scalar("dynamic/val_mse", val_mse, pretrain_epoch)
+                            writer.add_scalar("dynamic/val_steps", val_steps, pretrain_epoch)
                         else:
                             val_mse = float('inf')
                     else:

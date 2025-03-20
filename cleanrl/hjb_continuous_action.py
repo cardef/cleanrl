@@ -426,11 +426,11 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     initial_val_loss = 0
                     initial_val_steps = 0
-                    for traj in val_traj_indices:
-                        val_obs_traj = val_obs[traj]
-                        val_actions_traj = val_actions[traj]
-                        val_next_obs_traj = val_next_obs[traj]
-                        val_mask_traj = val_masks[traj]
+                    for i in range(len(val_traj_indices)):
+                        val_obs_traj = val_obs[i]
+                        val_actions_traj = val_actions[i]
+                        val_next_obs_traj = val_next_obs[i]
+                        val_mask_traj = val_masks[i]
                         
                         val_pred = dynamic_model(val_obs_traj[0].unsqueeze(0), val_actions_traj.unsqueeze(0))
                         val_steps = val_mask_traj.sum().item()
@@ -490,7 +490,7 @@ if __name__ == "__main__":
                 # Validation
                 with torch.no_grad():
                     if len(val_traj_indices) > 0:
-                        val_traj_idx = torch.randint(0, len(val_traj_indices), (1,)).item()
+                        val_traj_idx = random.randint(0, len(val_obs)-1)
                         val_obs_traj = val_obs[val_traj_idx]
                         val_actions_traj = val_actions[val_traj_idx]
                         val_next_obs_traj = val_next_obs[val_traj_idx]

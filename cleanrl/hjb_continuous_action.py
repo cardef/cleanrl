@@ -466,9 +466,32 @@ if __name__ == "__main__":
                         break
             print(f"Pretraining complete. Val MSE: {val_mse:.4f}")
 
+
+        # bootstrap value if not done
+        with torch.no_grad():
+            next_value = agent.critic(next_obs).reshape(1, -1)
+            advantages = torch.zeros_like(rewards).to(device)
+            lastgaelam = 0
+            for t in reversed(range(args.num_steps)):
+                if t == args.num_steps - 1:
+                    nextnonterminal = 1.0 - next_done
+                    nextvalues = next_value
+                else:
+                    nextnonterminal = 1.0 - dones[t + 1]
+                    nextvalues = agent.critic(obs[t + 1]).reshape(1, -1)
+                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+            returns = advantages + values
+
+        # flatten the batch
+        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_returns = returns.reshape(-1)
+        b_values = values.reshape(-1)
+        b_rewards = rewards.reshape(-1)
+        
         # Reward model evaluation check
         print("Evaluating reward model...")
-        b_rewards = rewards.reshape(-1)
         
         # Use all transitions since rewards are valid even when done
         indices = torch.randperm(b_obs.size(0))
@@ -514,28 +537,6 @@ if __name__ == "__main__":
                 else:
                     if (patience_counter_r := patience_counter_r + 1) >= 5:
                         break
-
-        # bootstrap value if not done
-        with torch.no_grad():
-            next_value = agent.critic(next_obs).reshape(1, -1)
-            advantages = torch.zeros_like(rewards).to(device)
-            lastgaelam = 0
-            for t in reversed(range(args.num_steps)):
-                if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = agent.critic(obs[t + 1]).reshape(1, -1)
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
-            returns = advantages + values
-
-        # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
-        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
-        b_returns = returns.reshape(-1)
-        b_values = values.reshape(-1)
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)

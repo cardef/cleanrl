@@ -134,11 +134,20 @@ class ODEFunc(nn.Module):
         self.dt = 0.05  # Should match environment timestep
 
     def forward(self, t, x, a_sequence):
-        # x shape: (batch_size, obs_dim)
-        # a_sequence shape: (batch_size, seq_len, action_dim)
-        idx = torch.clamp((t / self.dt).long(), 0, a_sequence.size(1)-1)  # (batch_size,)
-        a = a_sequence[torch.arange(x.size(0)), idx].unsqueeze(-1) if a_sequence.dim() == 2 else a_sequence[torch.arange(x.size(0)), idx]  # (batch_size, action_dim)
-        return self.net(torch.cat([x, a], dim=-1))  # (batch_size, obs_dim)
+        assert x.ndim == 2, f"x must be (batch, obs_dim), got {x.shape}"
+        assert a_sequence.ndim == 3, f"a_sequence must be (batch, seq_len, action_dim), got {a_sequence.shape}"
+        assert x.shape[0] == a_sequence.shape[0], "Batch size mismatch between x and a_sequence"
+        
+        idx = torch.clamp((t / self.dt).long(), 0, a_sequence.size(1)-1)
+        a = a_sequence[torch.arange(x.size(0)), idx].unsqueeze(-1) if a_sequence.dim() == 2 else a_sequence[torch.arange(x.size(0)), idx]
+        
+        assert a.shape == (x.shape[0], self.action_dim), \
+            f"Action shape mismatch: {a.shape} vs expected ({x.shape[0]}, {self.action_dim})"
+        
+        output = self.net(torch.cat([x, a], dim=-1))
+        assert output.shape == x.shape, \
+            f"Output shape {output.shape} should match input x shape {x.shape}"
+        return output
 
 class DynamicModel(nn.Module):
     def __init__(self, obs_dim, action_dim):
@@ -156,20 +165,26 @@ class DynamicModel(nn.Module):
         )
 
     def forward(self, initial_obs, action_sequences):
-        # initial_obs shape: (batch_size, obs_dim)
-        # action_sequences shape: (batch_size, seq_len, action_dim)
+        assert initial_obs.ndim == 2, f"initial_obs must be (batch, obs_dim), got {initial_obs.shape}"
+        assert action_sequences.ndim == 3, \
+            f"action_sequences must be (batch, seq_len, action_dim), got {action_sequences.shape}"
+        
         batch_size, seq_len = action_sequences.shape[:2]
+        t_eval = torch.stack([torch.linspace(0, self.dt*seq_len, seq_len+1)]*batch_size)
         
-        # Create time evaluation points for entire trajectory
-        t_eval = torch.stack([torch.linspace(0, self.dt*seq_len, seq_len+1)]*batch_size)  # (batch_size, seq_len+1)
+        assert t_eval.shape == (batch_size, seq_len+1), \
+            f"t_eval shape mismatch: {t_eval.shape} vs expected ({batch_size}, {seq_len+1})"
+        
         problem = to.InitialValueProblem(
-            y0=initial_obs,  # (batch_size, obs_dim)
-            t_eval=t_eval.to(initial_obs.device),  # (batch_size, seq_len+1)
+            y0=initial_obs,
+            t_eval=t_eval.to(initial_obs.device),
         )
-        sol = self.adjoint.solve(problem, args=action_sequences)  # ys shape: (batch_size, seq_len+1, obs_dim)
+        sol = self.adjoint.solve(problem, args=action_sequences)
         
-        # Return all predicted states except initial
-        return sol.ys[:, 1:, :]  # (batch_size, seq_len, obs_dim)
+        assert sol.ys.shape == (batch_size, seq_len+1, self.ode_func.net[-1].out_features), \
+            f"Solution shape {sol.ys.shape} vs expected ({batch_size}, {seq_len+1}, {self.ode_func.net[-1].out_features})"
+        
+        return sol.ys[:, 1:, :]
 
 
 class Actor(nn.Module):
@@ -196,11 +211,15 @@ class Actor(nn.Module):
         )
 
     def forward(self, x):
-        # x shape: (batch_size, obs_dim)
-        x = torch.relu(self.fc1(x))  # (batch_size, 256)
-        x = torch.relu(self.fc2(x))  # (batch_size, 256)
-        x = torch.tanh(self.fc_mu(x))  # (batch_size, action_dim)
-        return x * self.action_scale + self.action_bias  # (batch_size, action_dim)
+        assert x.ndim == 2, f"Input must be (batch, obs_dim), got {x.shape}"
+        x = torch.relu(self.fc1(x))
+        assert x.shape == (x.shape[0], 256), f"After fc1: {x.shape} vs (batch, 256)"
+        x = torch.relu(self.fc2(x)) 
+        assert x.shape == (x.shape[0], 256), f"After fc2: {x.shape} vs (batch, 256)"
+        x = torch.tanh(self.fc_mu(x))
+        assert x.shape == (x.shape[0], self.action_scale.shape[0]), \
+            f"Final action shape {x.shape} vs ({x.shape[0]}, {self.action_scale.shape[0]})"
+        return x * self.action_scale + self.action_bias
 
 class Agent(nn.Module):
     def __init__(self, envs):

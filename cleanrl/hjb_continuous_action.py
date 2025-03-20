@@ -515,9 +515,15 @@ if __name__ == "__main__":
                             val_mse = val_loss / val_steps
                             val_pred_flat = val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]].cpu().numpy()
                             val_true_flat = val_next_obs_traj[:-1][val_mask_traj[:-1]].cpu().numpy()
-                            val_r2 = r2_score(val_true_flat, val_pred_flat)
+                            
+                            # Add check for R²
+                            if len(val_pred_flat) > 0 and len(val_true_flat) > 0:
+                                val_r2 = r2_score(val_true_flat, val_pred_flat)
+                                writer.add_scalar("dynamic/val_r2", val_r2, pretrain_epoch)
+                            else:
+                                val_r2 = -1.0
+                            
                             writer.add_scalar("dynamic/val_mse", val_mse, pretrain_epoch)
-                            writer.add_scalar("dynamic/val_r2", val_r2, pretrain_epoch)
                             writer.add_scalar("dynamic/val_steps", val_steps, pretrain_epoch)
                         else:
                             val_mse = float('inf')

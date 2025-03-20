@@ -448,9 +448,17 @@ if __name__ == "__main__":
                     if initial_val_steps > 0:
                         initial_val_mse = initial_val_loss / initial_val_steps
                         writer.add_scalar("dynamic/initial_val_mse", initial_val_mse, iteration)
+
+            # Check if dynamic model is already good enough
+            if len(val_traj_indices) > 0 and initial_val_steps > 0 and initial_val_mse <= args.hjb_dynamic_threshold:
+                print(f"Dynamic model already good (val MSE {initial_val_mse:.4f} <= {args.hjb_dynamic_threshold}), skipping training")
+                writer.add_scalar("dynamic/skipped_training", 1, iteration)
+            else:
+                writer.add_scalar("dynamic/skipped_training", 0, iteration)
+                print(f"Dynamic model needs training (val MSE {initial_val_mse if initial_val_steps > 0 else 'N/A':.4f} > {args.hjb_dynamic_threshold})")
             
-            best_val_mse = float('inf')
-            patience_counter = 0
+                best_val_mse = float('inf')
+                patience_counter = 0
             
             for pretrain_epoch in trange(5000, desc="Pretraining"):
                 # Randomly sample a trajectory

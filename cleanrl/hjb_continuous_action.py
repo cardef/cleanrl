@@ -134,11 +134,11 @@ class ODEFunc(nn.Module):
         self.dt = 0.05  # Should match environment timestep
 
     def forward(self, t, x, a_sequence):
-        # Calculate which action to use based on current time
-        idx = torch.clamp((t / self.dt).long(), 0, a_sequence.size(1)-1)
-        # Ensure action has correct dimensionality
-        a = a_sequence[torch.arange(x.size(0)), idx].unsqueeze(-1) if a_sequence.dim() == 2 else a_sequence[torch.arange(x.size(0)), idx]
-        return self.net(torch.cat([x, a], dim=-1))
+        # x shape: (batch_size, obs_dim)
+        # a_sequence shape: (batch_size, seq_len, action_dim)
+        idx = torch.clamp((t / self.dt).long(), 0, a_sequence.size(1)-1)  # (batch_size,)
+        a = a_sequence[torch.arange(x.size(0)), idx].unsqueeze(-1) if a_sequence.dim() == 2 else a_sequence[torch.arange(x.size(0)), idx]  # (batch_size, action_dim)
+        return self.net(torch.cat([x, a], dim=-1))  # (batch_size, obs_dim)
 
 class DynamicModel(nn.Module):
     def __init__(self, obs_dim, action_dim):
@@ -156,19 +156,20 @@ class DynamicModel(nn.Module):
         )
 
     def forward(self, initial_obs, action_sequences):
+        # initial_obs shape: (batch_size, obs_dim)
+        # action_sequences shape: (batch_size, seq_len, action_dim)
         batch_size, seq_len = action_sequences.shape[:2]
         
         # Create time evaluation points for entire trajectory
-        t_eval = torch.stack([torch.linspace(0, self.dt*seq_len, seq_len+1)]*batch_size)
+        t_eval = torch.stack([torch.linspace(0, self.dt*seq_len, seq_len+1)]*batch_size)  # (batch_size, seq_len+1)
         problem = to.InitialValueProblem(
-            y0=initial_obs,
-            t_eval=t_eval.to(initial_obs.device),
-            
+            y0=initial_obs,  # (batch_size, obs_dim)
+            t_eval=t_eval.to(initial_obs.device),  # (batch_size, seq_len+1)
         )
-        sol = self.adjoint.solve(problem, args=action_sequences)
+        sol = self.adjoint.solve(problem, args=action_sequences)  # ys shape: (batch_size, seq_len+1, obs_dim)
         
         # Return all predicted states except initial
-        return sol.ys[:, 1:, :]
+        return sol.ys[:, 1:, :]  # (batch_size, seq_len, obs_dim)
 
 
 class Actor(nn.Module):
@@ -195,10 +196,11 @@ class Actor(nn.Module):
         )
 
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = torch.tanh(self.fc_mu(x))
-        return x * self.action_scale + self.action_bias
+        # x shape: (batch_size, obs_dim)
+        x = torch.relu(self.fc1(x))  # (batch_size, 256)
+        x = torch.relu(self.fc2(x))  # (batch_size, 256)
+        x = torch.tanh(self.fc_mu(x))  # (batch_size, action_dim)
+        return x * self.action_scale + self.action_bias  # (batch_size, action_dim)
 
 class Agent(nn.Module):
     def __init__(self, envs):
@@ -385,6 +387,10 @@ if __name__ == "__main__":
 
         # 3. Prepare trajectory datasets
         def prepare_trajectory_data(traj_indices):
+            # obs_slice shape: (traj_length, obs_dim)
+            # action_slice shape: (traj_length, action_dim) 
+            # next_obs_slice shape: (traj_length, obs_dim)
+            # mask shape: (traj_length,)
             traj_obs = []
             traj_actions = []
             traj_next_obs = []
@@ -491,7 +497,10 @@ if __name__ == "__main__":
                 # Forward pass
                 dynamic_optimizer.zero_grad()
                 try:
-                    pred_traj = dynamic_model(traj_obs[0].unsqueeze(0), traj_actions.unsqueeze(0))
+                    pred_traj = dynamic_model(
+                        traj_obs[0].unsqueeze(0),  # (1, obs_dim)
+                        traj_actions.unsqueeze(0)  # (1, traj_length, action_dim)
+                    )  # output shape: (1, traj_length, obs_dim)
                 except Exception as e:
                     print(f"Dynamic model forward failed: {e}")
                     writer.add_scalar("dynamic/training_failed", 1, pretrain_epoch)
@@ -679,12 +688,13 @@ if __name__ == "__main__":
                 # Policy update (actor)
                 for _ in range(args.hjb_policy_steps):
                     compute_value_grad = grad(lambda x: agent.critic(x).squeeze())
-                    dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
+                    dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)  # (minibatch_size, obs_dim)
 
                     # Hamiltonian calculation
-                    current_actions = agent.actor(mb_obs)
+                    current_actions = agent.actor(mb_obs)  # (minibatch_size, action_dim)
+                    f = dynamic_model(mb_obs, current_actions.unsqueeze(1))[:,0,:]  # (minibatch_size, obs_dim)
                     hamiltonian = reward_model(mb_obs, current_actions) + \
-                                torch.einsum("...i,...i->...", dVdx, dynamic_model(mb_obs, current_actions))
+                                torch.einsum("bi,bi->b", dVdx, f)  # (minibatch_size,)
 
                     # Actor loss and update
                     actor_loss = -hamiltonian.mean()

@@ -160,9 +160,9 @@ class DynamicModel(nn.Module):
         problem = to.InitialValueProblem(
             y0=initial_obs,
             t_eval=t_eval.to(initial_obs.device),
-            args=action_sequences
+            
         )
-        sol = self.adjoint.solve(problem)
+        sol = self.adjoint.solve(problem, args=action_sequences)
         
         # Return all predicted states except initial
         return sol.ys[:, 1:, :]

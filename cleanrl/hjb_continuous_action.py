@@ -27,7 +27,7 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
+    cuda: bool = False
     """if toggled, cuda will be enabled by default"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
@@ -58,7 +58,7 @@ class Args:
     
 
     # Algorithm specific arguments
-    env_id: str = "HalfCheetah-v4"
+    env_id: str = "InvertedPendulum-v4"
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""

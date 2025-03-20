@@ -350,118 +350,129 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
         
-        # Create trajectory validity mask
-        dones_mask = dones.cpu().numpy().transpose(1, 0)  # Shape [num_envs, num_steps]
-        traj_valid_mask = np.ones_like(dones_mask, dtype=bool)
-        for env_idx in range(args.num_envs):
-            done_indices = np.where(dones_mask[env_idx])[0]
-            if len(done_indices) > 0:
-                first_done = done_indices[0]
-                traj_valid_mask[env_idx, first_done+1:] = False
-        traj_valid_mask = torch.tensor(traj_valid_mask, device=device)
+        # 1. Identify complete trajectories across all environments
+        trajectories = []
+        current_start = 0
 
-        # Reorganize data into trajectory-first format
-        traj_obs = obs.permute(1, 0, 2)        # [num_envs, num_steps, obs_dim]
-        traj_actions = actions.permute(1, 0, 2) # [num_envs, num_steps, action_dim]
-        traj_next_obs = next_observations.permute(1, 0, 2)
+        # Find trajectory boundaries using done signals
+        for step in range(args.num_steps):
+            if dones[step].any():
+                # For each environment that finished
+                for env_idx in torch.where(dones[step])[0]:
+                    trajectories.append({
+                        'start': current_start,
+                        'end': step,
+                        'env_idx': env_idx.item(),
+                        'length': step - current_start + 1
+                    })
+                current_start = step + 1
 
-        # Split into train/validation trajectories
-        env_indices = torch.randperm(args.num_envs)
-        split = int(0.8 * args.num_envs)
-        train_idx, val_idx = env_indices[:split], env_indices[split:]
+        # Handle final partial trajectory
+        if current_start < args.num_steps:
+            trajectories.append({
+                'start': current_start,
+                'end': args.num_steps - 1,
+                'env_idx': 0,  # For single env case
+                'length': args.num_steps - current_start
+            })
 
-        train_obs = traj_obs[train_idx]
-        train_actions = traj_actions[train_idx]
-        train_next_obs = traj_next_obs[train_idx]
-        train_valid_mask = traj_valid_mask[train_idx]
+        # 2. Split trajectories into train/validation
+        traj_indices = torch.randperm(len(trajectories))
+        split = int(0.8 * len(trajectories))
+        train_traj_indices = traj_indices[:split]
+        val_traj_indices = traj_indices[split:]
 
-        val_obs = traj_obs[val_idx]
-        val_actions = traj_actions[val_idx]
-        val_next_obs = traj_next_obs[val_idx]
-        val_valid_mask = traj_valid_mask[val_idx]
+        # 3. Prepare trajectory datasets
+        def prepare_trajectory_data(traj_indices):
+            traj_obs = []
+            traj_actions = []
+            traj_next_obs = []
+            traj_masks = []
+            
+            for idx in traj_indices:
+                traj = trajectories[idx]
+                env_idx = traj['env_idx']
+                
+                # Extract trajectory data
+                obs_slice = obs[traj['start']:traj['end']+1, env_idx]
+                action_slice = actions[traj['start']:traj['end']+1, env_idx]
+                next_obs_slice = next_observations[traj['start']:traj['end']+1, env_idx]
+                
+                # Create validity mask (all True except after termination)
+                mask = torch.ones(traj['length'], dtype=bool)
+                if dones[traj['end'], env_idx]:
+                    mask[-1] = False  # Mark terminal state
+                
+                traj_obs.append(obs_slice)
+                traj_actions.append(action_slice)
+                traj_next_obs.append(next_obs_slice)
+                traj_masks.append(mask)
+            
+            return (
+                torch.stack(traj_obs),
+                torch.stack(traj_actions),
+                torch.stack(traj_next_obs),
+                torch.stack(traj_masks)
+            )
+
+        # Prepare datasets
+        train_obs, train_actions, train_next_obs, train_masks = prepare_trajectory_data(train_traj_indices)
+        val_obs, val_actions, val_next_obs, val_masks = prepare_trajectory_data(val_traj_indices)
 
         # Dynamic model evaluation check
-        print("Evaluating dynamic model...")
-        with torch.no_grad():
-            if len(val_obs) > 0:
-                val_initial = val_obs[:, 0]
-                val_pred = dynamic_model(val_initial, val_actions)
-                
-                val_loss = 0
-                val_valid = 0
-                for t in range(args.num_steps):
-                    step_mask = val_valid_mask[:, t]
-                    if step_mask.any():
-                        val_loss += nn.MSELoss()(
-                            val_pred[step_mask, t],
-                            val_next_obs[step_mask, t]
-                        )
-                        val_valid += 1
-                initial_val_mse = (val_loss / val_valid).item() if val_valid > 0 else float('inf')
-            else:
-                initial_val_mse = float('inf')
-        
-        writer.add_scalar("dynamic/initial_val_mse", initial_val_mse, iteration)
-        
-        if initial_val_mse <= args.hjb_dynamic_threshold:
-            print(f"Dynamic model already good (val MSE {initial_val_mse:.4f} <= {args.hjb_dynamic_threshold}), skipping training")
+        if len(trajectories) == 0:
+            print("No trajectories found for training!")
         else:
-            print("Pretraining dynamic model...")
+            print(f"Training on {len(train_traj_indices)} trajectories, validating on {len(val_traj_indices)}")
+            
             best_val_mse = float('inf')
             patience_counter = 0
-
+            
             for pretrain_epoch in trange(5000, desc="Pretraining"):
-                if len(train_obs) == 0:
-                    print("exit")
-                    break  # No training data available
+                # Randomly sample a trajectory
+                traj_idx = torch.randint(0, len(train_traj_indices), (1,)).item()
                 
-                # Random batch of trajectories
-                batch_idx = torch.randint(0, len(train_obs), (args.minibatch_size,))
-                initial_obs = train_obs[batch_idx, 0]
-                batch_actions = train_actions[batch_idx]
-                batch_next_obs = train_next_obs[batch_idx]
-                batch_mask = train_valid_mask[batch_idx]
-
+                # Get trajectory data
+                traj_obs = train_obs[traj_idx]
+                traj_actions = train_actions[traj_idx]
+                traj_next_obs = train_next_obs[traj_idx]
+                traj_mask = train_masks[traj_idx]
+                
                 # Forward pass
                 dynamic_optimizer.zero_grad()
-                pred_traj = dynamic_model(initial_obs, batch_actions)
+                pred_traj = dynamic_model(traj_obs[0].unsqueeze(0), traj_actions.unsqueeze(0))
                 
                 # Calculate masked loss
-                loss = 0
-                valid_steps = 0
-                for t in range(args.num_steps):
-                    step_mask = batch_mask[:, t]
-                    if step_mask.any():
-                        loss += nn.MSELoss()(
-                            pred_traj[step_mask, t], 
-                            batch_next_obs[step_mask, t]
-                        )
-                        valid_steps += 1
-                
+                valid_steps = traj_mask.sum().item()
                 if valid_steps == 0:
                     continue
                     
-                loss = loss / valid_steps
+                loss = nn.MSELoss()(
+                    pred_traj[0, :traj_mask.shape[0]-1][traj_mask[:-1]],
+                    traj_next_obs[:-1][traj_mask[:-1]]
+                )
                 loss.backward()
                 dynamic_optimizer.step()
 
                 # Validation
                 with torch.no_grad():
-                    if len(val_obs) > 0:
-                        val_initial = val_obs[:, 0]
-                        val_pred = dynamic_model(val_initial, val_actions)
+                    if len(val_traj_indices) > 0:
+                        val_traj_idx = torch.randint(0, len(val_traj_indices), (1,)).item()
+                        val_obs_traj = val_obs[val_traj_idx]
+                        val_actions_traj = val_actions[val_traj_idx]
+                        val_next_obs_traj = val_next_obs[val_traj_idx]
+                        val_mask_traj = val_masks[val_traj_idx]
                         
-                        val_loss = 0
-                        val_valid = 0
-                        for t in range(args.num_steps):
-                            step_mask = val_valid_mask[:, t]
-                            if step_mask.any():
-                                val_loss += nn.MSELoss()(
-                                    val_pred[step_mask, t],
-                                    val_next_obs[step_mask, t]
-                                )
-                                val_valid += 1
-                        val_mse = (val_loss / val_valid).item() if val_valid > 0 else float('inf')
+                        val_pred = dynamic_model(val_obs_traj[0].unsqueeze(0), val_actions_traj.unsqueeze(0))
+                        val_steps = val_mask_traj.sum().item()
+                        if val_steps > 0:
+                            val_loss = nn.MSELoss()(
+                                val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]],
+                                val_next_obs_traj[:-1][val_mask_traj[:-1]]
+                            ).item()
+                            val_mse = val_loss / val_steps
+                        else:
+                            val_mse = float('inf')
                     else:
                         val_mse = float('inf')
 
@@ -473,27 +484,8 @@ if __name__ == "__main__":
                     patience_counter += 1
                     if patience_counter >= args.hjb_dynamic_patience:
                         break
-            if len(val_obs) > 0:
-                # Re-calculate final validation MSE
-                with torch.no_grad():
-                    val_initial = val_obs[:, 0]
-                    val_pred = dynamic_model(val_initial, val_actions)
-                    
-                    val_loss = 0
-                    val_valid = 0
-                    for t in range(args.num_steps):
-                        step_mask = val_valid_mask[:, t]
-                        if step_mask.any():
-                            val_loss += nn.MSELoss()(
-                                val_pred[step_mask, t],
-                                val_next_obs[step_mask, t]
-                            )
-                            val_valid += 1
-                    final_val_mse = (val_loss / val_valid).item() if val_valid > 0 else float('inf')
-                print(f"Pretraining complete. Final Val MSE: {final_val_mse:.4f}")
-                writer.add_scalar("dynamic/final_val_mse", final_val_mse, iteration)
-            else:
-                print("Pretraining complete. No validation data available.")
+
+            print(f"Dynamic model training completed. Best validation MSE: {best_val_mse:.4f}")
 
 
         # bootstrap value if not done

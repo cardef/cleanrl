@@ -147,7 +147,7 @@ class DynamicModel(nn.Module):
         # TorchODE components
         self.term = to.ODETerm(self.ode_func, with_args=True)
         self.step_method = to.Tsit5(term=self.term)
-        self.step_size_controller = to.IntegralController(atol=1e-6, rtol=1e-3, term=self.term)
+        self.step_size_controller = to.IntegralController(atol=1e-9, rtol=1e-6, term=self.term)
         self.adjoint = to.AutoDiffAdjoint(
             step_method=self.step_method,
             step_size_controller=self.step_size_controller,

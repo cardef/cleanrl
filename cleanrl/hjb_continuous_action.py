@@ -123,22 +123,25 @@ class ODEFunc(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, 16),
+            nn.Linear(obs_dim + action_dim, 64),
             nn.Softplus(),
-            nn.Linear(16, 16),
+            nn.Linear(64, 64),
             nn.Softplus(),
-            nn.Linear(16, obs_dim),
+            nn.Linear(64, obs_dim),
         )
-        
-    def forward(self, t, x, a):
-        
-        return self.net(torch.cat([x,a], dim=-1))
+        self.dt = 0.05  # Should match environment timestep
+
+    def forward(self, t, x, a_sequence):
+        # Calculate which action to use based on current time
+        idx = torch.clamp((t / self.dt).long(), 0, a_sequence.size(1)-1)
+        a = a_sequence[torch.arange(x.size(0)), idx]
+        return self.net(torch.cat([x, a], dim=-1))
 
 class DynamicModel(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.ode_func = ODEFunc(obs_dim, action_dim)
-        self.dt = 0.05  # Should match environment timestep
+        self.dt = 0.05
         
         # TorchODE components
         self.term = to.ODETerm(self.ode_func, with_args=True)
@@ -149,16 +152,20 @@ class DynamicModel(nn.Module):
             step_size_controller=self.step_size_controller,
         )
 
-    def forward(self, obs, action):
-        batch_size = obs.size(0)
+    def forward(self, initial_obs, action_sequences):
+        batch_size, seq_len = action_sequences.shape[:2]
         
-        # Create time evaluation points for each batch element
-        problem = to.InitialValueProblem(y0=obs, t_eval=torch.tensor([0.0, self.dt]).repeat(batch_size,1))
-        sol = self.adjoint.solve(problem, args=action)
+        # Create time evaluation points for entire trajectory
+        t_eval = torch.stack([torch.linspace(0, self.dt*seq_len, seq_len+1)]*batch_size)
+        problem = to.InitialValueProblem(
+            y0=initial_obs,
+            t_eval=t_eval.to(initial_obs.device),
+            args=action_sequences
+        )
+        sol = self.adjoint.solve(problem)
         
-        # Extract final state and return observation portion
-        next_x = sol.ys[:, -1, :]  # Shape: [batch_size, obs_dim + action_dim]
-        return next_x
+        # Return all predicted states except initial
+        return sol.ys[:, 1:, :]
 
 
 class Actor(nn.Module):
@@ -335,36 +342,56 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
         
-        # Prepare data for dynamic model
-        b_obs = obs.reshape(-1, obs_dim)
-        b_actions = actions.reshape(-1, action_dim)
-        b_next_obs = next_observations.reshape(-1, obs_dim)
-        b_dones = dones.reshape(-1)
-        
-        mask = b_dones == 0
-        if mask.sum() == 0:
-            print("No valid transitions for evaluation/training")
-            initial_val_mse = float('inf')  # Force training if we get data later
-            writer.add_scalar("dynamic/initial_val_mse", initial_val_mse, iteration)
-            continue
-            
-        # Split into train/validation (80/20)
-        valid_obs = b_obs[mask]
-        valid_actions = b_actions[mask]
-        valid_next_obs = b_next_obs[mask]
-        
-        indices = torch.randperm(valid_obs.size(0))
-        split = int(0.8 * valid_obs.size(0))
-        train_idx, val_idx = indices[:split], indices[split:]
-        
-        train_obs, train_actions, train_next_obs = valid_obs[train_idx], valid_actions[train_idx], valid_next_obs[train_idx]
-        val_obs, val_actions, val_next_obs = valid_obs[val_idx], valid_actions[val_idx], valid_next_obs[val_idx]
+        # Create trajectory validity mask
+        dones_mask = dones.cpu().numpy().transpose(1, 0)  # Shape [num_envs, num_steps]
+        traj_valid_mask = np.ones_like(dones_mask, dtype=bool)
+        for env_idx in range(args.num_envs):
+            done_indices = np.where(dones_mask[env_idx])[0]
+            if len(done_indices) > 0:
+                first_done = done_indices[0]
+                traj_valid_mask[env_idx, first_done+1:] = False
+        traj_valid_mask = torch.tensor(traj_valid_mask, device=device)
+
+        # Reorganize data into trajectory-first format
+        traj_obs = obs.permute(1, 0, 2)        # [num_envs, num_steps, obs_dim]
+        traj_actions = actions.permute(1, 0, 2) # [num_envs, num_steps, action_dim]
+        traj_next_obs = next_observations.permute(1, 0, 2)
+
+        # Split into train/validation trajectories
+        env_indices = torch.randperm(args.num_envs)
+        split = int(0.8 * args.num_envs)
+        train_idx, val_idx = env_indices[:split], env_indices[split:]
+
+        train_obs = traj_obs[train_idx]
+        train_actions = traj_actions[train_idx]
+        train_next_obs = traj_next_obs[train_idx]
+        train_valid_mask = traj_valid_mask[train_idx]
+
+        val_obs = traj_obs[val_idx]
+        val_actions = traj_actions[val_idx]
+        val_next_obs = traj_next_obs[val_idx]
+        val_valid_mask = traj_valid_mask[val_idx]
 
         # Dynamic model evaluation check
         print("Evaluating dynamic model...")
         with torch.no_grad():
-            pred_val = dynamic_model(val_obs, val_actions)
-            initial_val_mse = nn.MSELoss()(pred_val, val_next_obs).item()
+            if len(val_obs) > 0:
+                val_initial = val_obs[:, 0]
+                val_pred = dynamic_model(val_initial, val_actions)
+                
+                val_loss = 0
+                val_valid = 0
+                for t in range(args.num_steps):
+                    step_mask = val_valid_mask[:, t]
+                    if step_mask.any():
+                        val_loss += nn.MSELoss()(
+                            val_pred[step_mask, t],
+                            val_next_obs[step_mask, t]
+                        )
+                        val_valid += 1
+                initial_val_mse = (val_loss / val_valid).item() if val_valid > 0 else float('inf')
+            else:
+                initial_val_mse = float('inf')
         
         writer.add_scalar("dynamic/initial_val_mse", initial_val_mse, iteration)
         
@@ -372,51 +399,72 @@ if __name__ == "__main__":
             print(f"Dynamic model already good (val MSE {initial_val_mse:.4f} <= {args.hjb_dynamic_threshold}), skipping training")
         else:
             print("Pretraining dynamic model...")
+            best_val_mse = float('inf')
+            patience_counter = 0
 
-        best_val_mse = float('inf')
-        patience_counter = 0
-        patience, min_delta = args.hjb_dynamic_patience, args.hjb_dynamic_min_delta
-        for pretrain_epoch in trange(5000, desc="Pretraining"):
-            if mask.sum() == 0:
-                break  # Skip if no valid data
-
-            # Training step
-            dynamic_optimizer.zero_grad()
-            pred_train = dynamic_model(train_obs, train_actions)
-            loss = nn.MSELoss()(pred_train, train_next_obs)
-            loss.backward()
-            dynamic_optimizer.step()
-            
-            # Calculate metrics
-            with torch.no_grad():
-                # Training metrics
-                train_mse = loss.item()
-                train_mae = nn.L1Loss()(pred_train, train_next_obs).item()
-                train_r2 = r2_score(train_next_obs.cpu().numpy(), pred_train.detach().cpu().numpy())
+            for pretrain_epoch in trange(5000, desc="Pretraining"):
+                if len(train_obs) == 0:
+                    break  # No training data available
                 
-                # Validation metrics
-                pred_val = dynamic_model(val_obs, val_actions)
-                val_mse = nn.MSELoss()(pred_val, val_next_obs).item()
-                val_mae = nn.L1Loss()(pred_val, val_next_obs).item()
-                val_r2 = r2_score(val_next_obs.cpu().numpy(), pred_val.detach().cpu().numpy())
-            
-            # Log both training and validation metrics
-            writer.add_scalar("dynamic/pretrain_train_mse", train_mse, pretrain_epoch)
-            writer.add_scalar("dynamic/pretrain_train_mae", train_mae, pretrain_epoch) 
-            writer.add_scalar("dynamic/pretrain_train_r2", train_r2, pretrain_epoch)
-            writer.add_scalar("dynamic/pretrain_val_mse", val_mse, pretrain_epoch)
-            writer.add_scalar("dynamic/pretrain_val_mae", val_mae, pretrain_epoch)
-            writer.add_scalar("dynamic/pretrain_val_r2", val_r2, pretrain_epoch)
-            
-            # Early stopping check
-            if val_mse < (best_val_mse - min_delta):
-                best_val_mse = val_mse
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    break
-        print(f"Pretraining complete. Val MSE: {val_mse:.4f}, Val R²: {val_r2:.2f}")
+                # Random batch of trajectories
+                batch_idx = torch.randint(0, len(train_obs), (args.minibatch_size,))
+                initial_obs = train_obs[batch_idx, 0]
+                batch_actions = train_actions[batch_idx]
+                batch_next_obs = train_next_obs[batch_idx]
+                batch_mask = train_valid_mask[batch_idx]
+
+                # Forward pass
+                dynamic_optimizer.zero_grad()
+                pred_traj = dynamic_model(initial_obs, batch_actions)
+                
+                # Calculate masked loss
+                loss = 0
+                valid_steps = 0
+                for t in range(args.num_steps):
+                    step_mask = batch_mask[:, t]
+                    if step_mask.any():
+                        loss += nn.MSELoss()(
+                            pred_traj[step_mask, t], 
+                            batch_next_obs[step_mask, t]
+                        )
+                        valid_steps += 1
+                
+                if valid_steps == 0:
+                    continue
+                    
+                loss = loss / valid_steps
+                loss.backward()
+                dynamic_optimizer.step()
+
+                # Validation
+                with torch.no_grad():
+                    if len(val_obs) > 0:
+                        val_initial = val_obs[:, 0]
+                        val_pred = dynamic_model(val_initial, val_actions)
+                        
+                        val_loss = 0
+                        val_valid = 0
+                        for t in range(args.num_steps):
+                            step_mask = val_valid_mask[:, t]
+                            if step_mask.any():
+                                val_loss += nn.MSELoss()(
+                                    val_pred[step_mask, t],
+                                    val_next_obs[step_mask, t]
+                                )
+                                val_valid += 1
+                        val_mse = (val_loss / val_valid).item() if val_valid > 0 else float('inf')
+                    else:
+                        val_mse = float('inf')
+
+                # Early stopping logic
+                if val_mse < (best_val_mse - args.hjb_dynamic_min_delta):
+                    best_val_mse = val_mse
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= args.hjb_dynamic_patience:
+                        break
+            print(f"Pretraining complete. Val MSE: {val_mse:.4f}")
 
         # Reward model evaluation check
         print("Evaluating reward model...")

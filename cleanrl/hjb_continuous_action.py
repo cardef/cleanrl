@@ -408,12 +408,8 @@ if __name__ == "__main__":
                 traj_next_obs.append(next_obs_slice)
                 traj_masks.append(mask)
             
-            return (
-                torch.stack(traj_obs),
-                torch.stack(traj_actions),
-                torch.stack(traj_next_obs),
-                torch.stack(traj_masks)
-            )
+            # Return lists instead of stacked tensors
+            return traj_obs, traj_actions, traj_next_obs, traj_masks
 
         # Prepare datasets
         train_obs, train_actions, train_next_obs, train_masks = prepare_trajectory_data(train_traj_indices)
@@ -430,7 +426,7 @@ if __name__ == "__main__":
             
             for pretrain_epoch in trange(5000, desc="Pretraining"):
                 # Randomly sample a trajectory
-                traj_idx = torch.randint(0, len(train_traj_indices), (1,)).item()
+                traj_idx = random.randint(0, len(train_obs)-1)
                 
                 # Get trajectory data
                 traj_obs = train_obs[traj_idx]
@@ -448,7 +444,7 @@ if __name__ == "__main__":
                     continue
                     
                 loss = nn.MSELoss()(
-                    pred_traj[0, :traj_mask.shape[0]-1][traj_mask[:-1]],
+                    pred_traj[0, :len(traj_obs)-1][traj_mask[:-1]],
                     traj_next_obs[:-1][traj_mask[:-1]]
                 )
                 loss.backward()

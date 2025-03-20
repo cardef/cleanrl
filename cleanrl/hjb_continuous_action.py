@@ -503,7 +503,7 @@ if __name__ == "__main__":
             
             for pretrain_epoch in trange(5000, desc="Pretraining"):
                 # Randomly sample a trajectory
-                traj_idx = random.randint(0, len(train_obs)-1)
+                traj_idx = random.randint(0, len(train_obs)-1) #train on every trajectory ai!
                 
                 # Get trajectory data
                 traj_obs = train_obs[traj_idx]

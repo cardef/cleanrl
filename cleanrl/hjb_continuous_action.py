@@ -289,7 +289,14 @@ if __name__ == "__main__":
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    # Ensure actions always have at least 1 dimension
+    action_shape = envs.single_action_space.shape
+    if not action_shape:  # Handle scalar action space
+        action_shape = (1,)
+    actions = torch.zeros((args.num_steps, args.num_envs) + action_shape).to(device)
+    # Ensure action storage maintains dimensionality
+    if len(action_shape) == 0:
+        actions = actions.unsqueeze(-1)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)

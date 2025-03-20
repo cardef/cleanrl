@@ -464,7 +464,27 @@ if __name__ == "__main__":
                     patience_counter += 1
                     if patience_counter >= args.hjb_dynamic_patience:
                         break
-            print(f"Pretraining complete. Val MSE: {val_mse:.4f}")
+            if len(val_obs) > 0:
+                # Re-calculate final validation MSE
+                with torch.no_grad():
+                    val_initial = val_obs[:, 0]
+                    val_pred = dynamic_model(val_initial, val_actions)
+                    
+                    val_loss = 0
+                    val_valid = 0
+                    for t in range(args.num_steps):
+                        step_mask = val_valid_mask[:, t]
+                        if step_mask.any():
+                            val_loss += nn.MSELoss()(
+                                val_pred[step_mask, t],
+                                val_next_obs[step_mask, t]
+                            )
+                            val_valid += 1
+                    final_val_mse = (val_loss / val_valid).item() if val_valid > 0 else float('inf')
+                print(f"Pretraining complete. Final Val MSE: {final_val_mse:.4f}")
+                writer.add_scalar("dynamic/final_val_mse", final_val_mse, iteration)
+            else:
+                print("Pretraining complete. No validation data available.")
 
 
         # bootstrap value if not done

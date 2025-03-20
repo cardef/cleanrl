@@ -435,10 +435,14 @@ if __name__ == "__main__":
                         val_pred = dynamic_model(val_obs_traj[0].unsqueeze(0), val_actions_traj.unsqueeze(0))
                         val_steps = val_mask_traj.sum().item()
                         if val_steps > 0:
+                            preds = val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]].cpu().numpy()
+                            trues = val_next_obs_traj[:-1][val_mask_traj[:-1]].cpu().numpy()
                             initial_val_loss += nn.MSELoss()(
                                 val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]],
                                 val_next_obs_traj[:-1][val_mask_traj[:-1]]
                             ).item() * val_steps
+                            initial_val_r2 = r2_score(trues, preds)
+                            writer.add_scalar("dynamic/initial_val_r2", initial_val_r2, iteration)
                             initial_val_steps += val_steps
                     
                     if initial_val_steps > 0:
@@ -492,7 +496,11 @@ if __name__ == "__main__":
                                 val_next_obs_traj[:-1][val_mask_traj[:-1]]
                             ).item()
                             val_mse = val_loss / val_steps
+                            val_pred_flat = val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]].cpu().numpy()
+                            val_true_flat = val_next_obs_traj[:-1][val_mask_traj[:-1]].cpu().numpy()
+                            val_r2 = r2_score(val_true_flat, val_pred_flat)
                             writer.add_scalar("dynamic/val_mse", val_mse, pretrain_epoch)
+                            writer.add_scalar("dynamic/val_r2", val_r2, pretrain_epoch)
                             writer.add_scalar("dynamic/val_steps", val_steps, pretrain_epoch)
                         else:
                             val_mse = float('inf')

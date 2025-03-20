@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchdiffeq import odeint_adjoint as odeint
+import torchode as to
 from sklearn.metrics import r2_score
 from torch import vmap
 from torch.func import grad
@@ -141,9 +141,25 @@ class DynamicModel(nn.Module):
         self.ode_func = ODEFunc(obs_dim + action_dim)
         self.dt = 0.05  # Should match environment timestep
         
+        # TorchODE components
+        self.term = to.ODETerm(self.ode_func)
+        self.step_method = to.Kutta4(term=self.term)
+        self.step_size_controller = to.FixedStepController()
+        self.adjoint = to.AutoDiffAdjoint(
+            self.step_method,
+            self.step_size_controller
+        )
+
     def forward(self, obs, action):
         x = torch.cat([obs, action], dim=1)
-        next_x = odeint(self.ode_func, x, torch.tensor([0.0, self.dt],).to(x.device), method='rk4', options=dict(step_size=self.dt/5))[-1]
+        batch_size = x.size(0)
+        
+        # Create time evaluation points for each batch element
+        problem = to.InitialValueProblem(y0=x, t_span=(0.0, self.dt))
+        sol = self.adjoint.solve(problem, step_size=self.dt/5)
+        
+        # Extract final state and return observation portion
+        next_x = sol.ys[:, -1, :]  # Shape: [batch_size, obs_dim + action_dim]
         return next_x[:, :obs.shape[1]]
 
 

@@ -574,6 +574,8 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     val_loss_sum = 0.0
                     val_steps_total = 0
+                    all_preds = []
+                    all_trues = []
                     for val_idx in range(len(val_obs)):
                         val_obs_traj = val_obs[val_idx]
                         val_actions_traj = val_actions[val_idx]
@@ -593,13 +595,32 @@ if __name__ == "__main__":
                             pred_slice = val_pred[0, :val_mask_traj.shape[0]-1][val_mask_traj[:-1]]
                             true_slice = val_next_obs_traj[:-1][val_mask_traj[:-1]]
                             
+                            # Accumulate for R² calculation
+                            all_preds.append(pred_slice.cpu().numpy())
+                            all_trues.append(true_slice.cpu().numpy())
+                            
+                            # Existing MSE calculation
                             val_loss = nn.MSELoss()(pred_slice, true_slice).item()
                             val_loss_sum += val_loss * valid_steps
                             val_steps_total += valid_steps
                     
+                    # Compute R² across all validation data
+                    if len(all_preds) > 0:
+                        all_preds = np.concatenate(all_preds)
+                        all_trues = np.concatenate(all_trues)
+                        
+                        if len(all_preds) >= 2 and np.var(all_trues) > 1e-8:
+                            val_r2 = r2_score(all_trues, all_preds)
+                        else:
+                            val_r2 = -1.0  # Indicate invalid calculation
+                    else:
+                        val_r2 = -1.0
+                    
+                    # Log metrics
                     if val_steps_total > 0:
                         val_mse = val_loss_sum / val_steps_total
                         writer.add_scalar("dynamic/val_mse", val_mse, pretrain_epoch)
+                        writer.add_scalar("dynamic/val_r2", val_r2, pretrain_epoch)
                         
                         # Early stopping
                         if val_mse < (best_val_mse - args.hjb_dynamic_min_delta):

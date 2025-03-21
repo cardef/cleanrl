@@ -404,16 +404,22 @@ if __name__ == "__main__":
 
         # 3. Prepare trajectory datasets
         def prepare_trajectory_data(traj_indices):
-            # obs_slice shape: (traj_length, obs_dim)
-            # action_slice shape: (traj_length, action_dim) 
-            # next_obs_slice shape: (traj_length, obs_dim)
-            # mask shape: (traj_length,)
             traj_obs = []
             traj_actions = []
             traj_next_obs = []
             traj_masks = []
             
-            for idx in traj_indices: #sample a batch of trajectories ai!
+            # Convert tensor indices to Python list
+            traj_indices = traj_indices.tolist()
+            
+            # Randomly sample a batch of trajectories
+            batch_size = 32  # Adjust based on available memory
+            if len(traj_indices) > batch_size:
+                sampled_indices = random.sample(traj_indices, batch_size)
+            else:
+                sampled_indices = traj_indices
+            
+            for idx in sampled_indices:
                 traj = trajectories[idx]
                 env_idx = traj['env_idx']
                 
@@ -425,14 +431,13 @@ if __name__ == "__main__":
                 # Create validity mask (all True except after termination)
                 mask = torch.ones(traj['length'], dtype=bool)
                 if dones[traj['end'], env_idx]:
-                    mask[-1] = False  # Mark terminal state
+                    mask[-1] = False
                 
                 traj_obs.append(obs_slice)
                 traj_actions.append(action_slice)
                 traj_next_obs.append(next_obs_slice)
                 traj_masks.append(mask)
             
-            # Return lists instead of stacked tensors
             return traj_obs, traj_actions, traj_next_obs, traj_masks
 
         # Prepare datasets

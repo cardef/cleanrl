@@ -459,11 +459,15 @@ if __name__ == "__main__":
             print(f"Training on {len(train_traj_indices)} trajectories, validating on {len(val_traj_indices)}")
             
             # Calculate initial validation metrics
-            if len(val_traj_indices) > 0:
+            if len(val_obs) != len(val_traj_indices):
+                print(f"Validation data filtered: {len(val_obs)}/{len(val_traj_indices)} trajectories valid")
+                writer.add_scalar("debug/val_traj_filtered", len(val_traj_indices)-len(val_obs), iteration)
+                
+            if len(val_obs) > 0:
                 with torch.no_grad():
                     initial_val_loss = 0
                     initial_val_steps = 0
-                    for i in range(len(val_traj_indices)):
+                    for i in range(len(val_obs)):
                         val_obs_traj = val_obs[i]
                         val_actions_traj = val_actions[i]
                         val_next_obs_traj = val_next_obs[i]

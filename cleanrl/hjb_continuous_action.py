@@ -413,7 +413,7 @@ if __name__ == "__main__":
             traj_next_obs = []
             traj_masks = []
             
-            for idx in traj_indices:
+            for idx in traj_indices: #sample a batch of trajectories ai!
                 traj = trajectories[idx]
                 env_idx = traj['env_idx']
                 

@@ -413,7 +413,7 @@ if __name__ == "__main__":
             traj_indices = traj_indices.tolist()
             
             # Randomly sample a batch of trajectories
-            batch_size = 32  # Adjust based on available memory
+            batch_size = 8  # Adjust based on available memory
             if len(traj_indices) > batch_size:
                 sampled_indices = random.sample(traj_indices, batch_size)
             else:

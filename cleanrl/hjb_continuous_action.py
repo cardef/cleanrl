@@ -176,7 +176,6 @@ def train_reward_with_validation(model, buffer, args, device):
     val_acts = actions[indices[split:]]
     val_targets = rewards[indices[split:]]
     
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     best_val_loss = float('inf')
     patience_counter = 0
     
@@ -186,9 +185,9 @@ def train_reward_with_validation(model, buffer, args, device):
         preds = model(train_obs, train_acts)
         train_loss = F.mse_loss(preds, train_targets)
         
-        optimizer.zero_grad()
+        reward_optimizer.zero_grad()
         train_loss.backward()
-        optimizer.step()
+        reward_optimizer.step()
         
         # Validation
         with torch.no_grad():
@@ -226,7 +225,7 @@ def train_dynamics_with_validation(model, buffer, args, device):
     val_acts = actions[indices[split:]]
     val_targets = next_obs[indices[split:]]
     
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    dynamicsoptimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     best_val_loss = float('inf')
     patience_counter = 0
     

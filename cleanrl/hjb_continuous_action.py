@@ -65,7 +65,7 @@ class Args:
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
 
-    model_train_threshold: float = 0.1
+    model_train_threshold: float = 0.05
     """validation loss threshold to consider models accurate enough"""
     model_val_ratio: float = 0.2
     """ratio of validation data for model training"""
@@ -412,7 +412,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     actor = HJBActor(envs).to(device)
     critic = HJBCritic(envs).to(device)
-    critic_optimizer = optim.AdamW(list(critic.parameters()), lr=args.learning_rate)
+    critic_optimizer = optim.AdamW(list(critic.parameters()), lr=args.learning_rate*0.1)
     actor_optimizer = optim.AdamW(list(actor.parameters()), lr=args.learning_rate)
     
     # Initialize dynamic and reward models

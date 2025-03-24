@@ -299,6 +299,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             mb_obs = data.observations
+            mb_obs.requires_grad_(True)  # Enable gradient tracking for observations
 
             # Compute value and gradients
             current_v = critic(mb_obs)

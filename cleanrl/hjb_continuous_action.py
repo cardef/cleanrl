@@ -20,6 +20,18 @@ from torch.utils.tensorboard import SummaryWriter
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
+    model_train_batch_size: int = 1024
+    """batch size for training dynamic and reward models"""
+    model_val_ratio: float = 0.2
+    """ratio of validation data for model training"""
+    model_train_threshold: float = 0.01  
+    """validation loss threshold to consider models accurate enough"""
+    model_val_patience: int = 5
+    """patience epochs for early stopping"""
+    model_val_delta: float = 0.001
+    """minimum improvement delta for early stopping"""
+    model_max_epochs: int = 50
+    """maximum training epochs for models"""
     seed: int = 1
     """seed of the experiment"""
     torch_deterministic: bool = True
@@ -237,6 +249,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
     reward_model = RewardModel(obs_dim, action_dim).to(device)
+    dynamic_optimizer = optim.Adam(dynamic_model.parameters(), lr=args.learning_rate)
+    reward_optimizer = optim.Adam(reward_model.parameters(), lr=args.learning_rate)
 
     envs.single_observation_space.dtype = np.float32
     rb = ReplayBuffer(

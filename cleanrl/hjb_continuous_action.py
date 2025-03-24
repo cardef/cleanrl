@@ -231,9 +231,16 @@ def train_reward_with_validation(model, buffer, args, device, writer, global_ste
 def train_dynamics_with_validation(model, buffer, args, device, writer, global_step):
     # Sample initial data
     data = buffer.sample(args.model_train_batch_size)
-    obs = data.observations
-    actions = data.actions.unsqueeze(1)  # Add sequence dimension [B, 1, A]
-    next_obs = data.next_observations
+    
+    # Filter out terminal transitions
+    non_terminal_mask = data.dones.squeeze(-1) == 0
+    obs = data.observations[non_terminal_mask]
+    actions = data.actions[non_terminal_mask].unsqueeze(1)  # Add sequence dimension [B, 1, A]
+    next_obs = data.next_observations[non_terminal_mask]
+    
+    if len(obs) == 0:  # Handle empty case
+        print("No non-terminal transitions for dynamics training")
+        return {"train": {"mse": 0, "mae": 0, "r2": 0}, "val": {"mse": 0, "mae": 0, "r2": 0}}
     
     # Split train/validation
     indices = torch.randperm(len(obs))
@@ -480,10 +487,19 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             # Check and train dynamic model
             with torch.no_grad():
                 dyn_val_data = rb.sample(args.batch_size)
-                dyn_val_actions = dyn_val_data.actions.unsqueeze(1)
-                dyn_val_preds = dynamic_model(dyn_val_data.observations, dyn_val_actions)
-                dyn_metrics = calculate_metrics(dyn_val_preds[:, 0, :], dyn_val_data.next_observations)
-                dyn_current_loss = dyn_metrics["mse"]
+                
+                # Filter out terminal transitions
+                non_terminal_mask = dyn_val_data.dones.squeeze(-1) == 0
+                dyn_val_obs = dyn_val_data.observations[non_terminal_mask]
+                dyn_val_acts = dyn_val_data.actions[non_terminal_mask].unsqueeze(1)
+                dyn_val_next_obs = dyn_val_data.next_observations[non_terminal_mask]
+                
+                if len(dyn_val_obs) == 0:  # Handle empty case
+                    dyn_current_loss = float('inf')
+                else:
+                    dyn_val_preds = dynamic_model(dyn_val_obs, dyn_val_acts)
+                    dyn_metrics = calculate_metrics(dyn_val_preds[:, 0, :], dyn_val_next_obs)
+                    dyn_current_loss = dyn_metrics["mse"]
                 writer.add_scalar("metrics/dynamic_val_mse", dyn_metrics["mse"], global_step)
                 writer.add_scalar("metrics/dynamic_val_mae", dyn_metrics["mae"], global_step)
                 writer.add_scalar("metrics/dynamic_val_r2", dyn_metrics["r2"], global_step)

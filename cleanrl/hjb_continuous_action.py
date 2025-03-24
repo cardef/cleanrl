@@ -156,6 +156,57 @@ class DynamicModel(nn.Module):
         # Return all predicted states except initial
         return sol.ys[:, 1:, :]
 
+def train_reward_with_validation(model, buffer, args, device):
+    """Train reward model with early stopping using replay buffer data"""
+    # Sample and split data
+    data = buffer.sample(args.model_train_batch_size)
+    obs = data.observations
+    actions = data.actions
+    rewards = data.rewards
+    
+    # Split train/validation
+    indices = torch.randperm(len(obs))
+    split = int(len(obs) * (1 - args.model_val_ratio))
+    
+    train_obs = obs[indices[:split]]
+    train_acts = actions[indices[:split]]
+    train_targets = rewards[indices[:split]]
+    
+    val_obs = obs[indices[split:]]
+    val_acts = actions[indices[split:]]
+    val_targets = rewards[indices[split:]]
+    
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(args.model_max_epochs):
+        # Training
+        model.train()
+        preds = model(train_obs, train_acts)
+        train_loss = F.mse_loss(preds, train_targets)
+        
+        optimizer.zero_grad()
+        train_loss.backward()
+        optimizer.step()
+        
+        # Validation
+        with torch.no_grad():
+            model.eval()
+            val_preds = model(val_obs, val_acts)
+            val_loss = F.mse_loss(val_preds, val_targets)
+            
+            # Early stopping check
+            if val_loss < best_val_loss - args.model_val_delta:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= args.model_val_patience:
+                    break
+                    
+    return best_val_loss.item()
+
 def train_dynamics_with_validation(model, buffer, args, device):
     # Sample initial data
     data = buffer.sample(args.model_train_batch_size)
@@ -363,21 +414,37 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             
-            # Check current model accuracy
-            with torch.no_grad():
-                val_data = rb.sample(args.batch_size)
-                val_actions = val_data.actions.unsqueeze(1)  # Add sequence dimension
-                val_preds = dynamic_model(val_data.observations, val_actions)
-                current_loss = F.mse_loss(val_preds[:, 0, :], val_data.next_observations).item()
+            # Model accuracy checks
+            skip_update = False
             
-            # Train model if needed
-            if current_loss > args.model_train_threshold:
-                print(f"Training dynamics model (current loss: {current_loss:.4f})")
-                final_loss = train_dynamics_with_validation(dynamic_model, rb, args, device)
-                
-                if final_loss > args.model_train_threshold:
-                    print(f"Model still inaccurate ({final_loss:.4f}), skipping agent update")
-                    continue
+            # Check and train dynamic model
+            with torch.no_grad():
+                dyn_val_data = rb.sample(args.batch_size)
+                dyn_val_actions = dyn_val_data.actions.unsqueeze(1)
+                dyn_val_preds = dynamic_model(dyn_val_data.observations, dyn_val_actions)
+                dyn_current_loss = F.mse_loss(dyn_val_preds[:, 0, :], dyn_val_data.next_observations).item()
+            
+            if dyn_current_loss > args.model_train_threshold:
+                print(f"Training dynamics model (loss: {dyn_current_loss:.4f})")
+                dyn_final_loss = train_dynamics_with_validation(dynamic_model, rb, args, device)
+                if dyn_final_loss > args.model_train_threshold:
+                    skip_update = True
+
+            # Check and train reward model
+            with torch.no_grad():
+                rew_val_data = rb.sample(args.batch_size)
+                rew_val_preds = reward_model(rew_val_data.observations, rew_val_data.actions)
+                rew_current_loss = F.mse_loss(rew_val_preds, rew_val_data.rewards).item()
+            
+            if rew_current_loss > args.model_train_threshold:
+                print(f"Training reward model (loss: {rew_current_loss:.4f})")
+                rew_final_loss = train_reward_with_validation(reward_model, rb, args, device)
+                if rew_final_loss > args.model_train_threshold:
+                    skip_update = True
+
+            if skip_update:
+                print("Skipping agent update due to model inaccuracy")
+                continue
 
             # Proceed with normal agent training
             data = rb.sample(args.batch_size)

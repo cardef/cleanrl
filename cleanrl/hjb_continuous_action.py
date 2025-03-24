@@ -3,6 +3,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import gymnasium as gym
 import numpy as np
@@ -77,6 +78,8 @@ class Args:
     """maximum training epochs for models"""
     model_train_batch_size: int = 1024
     """batch size for training dynamic and reward models"""
+    grad_norm_clip: Optional[float] = None
+    """gradient norm clipping threshold (None for no clipping)"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -543,6 +546,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 actor_loss = (-hamiltonian).mean()
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
+                if args.grad_norm_clip is not None:
+                    nn.utils.clip_grad_norm_(actor.parameters(), args.grad_norm_clip)
                 actor_optimizer.step()
             for _ in range(args.policy_frequency):    
                 dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
@@ -569,6 +574,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # Critic optimization
                 critic_optimizer.zero_grad()
                 critic_loss.backward()
+                if args.grad_norm_clip is not None:
+                    nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
                 critic_optimizer.step()
             if global_step % 100 == 0:
                 writer.add_scalar("losses/critic_values", current_v.mean().item(), global_step)

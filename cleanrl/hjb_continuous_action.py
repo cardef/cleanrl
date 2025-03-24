@@ -52,8 +52,6 @@ class Args:
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    tau: float = 0.005
-    """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
     exploration_noise: float = 0.1
@@ -146,10 +144,10 @@ class RewardModel(nn.Module):
         x = torch.cat([obs, action], dim=1)
         return self.net(x).squeeze(-1)
     
-class Critic(nn.Module):
+class HJBCritic(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
 
@@ -161,7 +159,7 @@ class Critic(nn.Module):
         return x
 
 
-class Actor(nn.Module):
+class HJBActor(nn.Module):
     def __init__(self, env):
         super().__init__()
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
@@ -223,8 +221,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    actor = Actor(envs).to(device)
-    critic = Critic(envs).to(device)
+    actor = HJBActor(envs).to(device)
+    critic = HJBCritic(envs).to(device)
     critic_optimizer = optim.AdamW(list(critic.parameters()), lr=args.learning_rate)
     actor_optimizer = optim.AdamW(list(actor.parameters()), lr=args.learning_rate)
 
@@ -276,28 +274,23 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             data = rb.sample(args.batch_size)
             with torch.no_grad():
                 next_state_actions = actor(data.next_observations)
-                qf1_next_target = critic(data.next_observations, next_state_actions)
-                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (qf1_next_target).view(-1)
+                next_q_values = critic(data.next_observations, next_state_actions)
+                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * next_q_values.view(-1)
 
-            qf1_a_values = critic(data.observations, data.actions).view(-1)
-            critic_loss = F.mse_loss(qf1_a_values, next_q_value)
+            current_q_values = critic(data.observations, data.actions).view(-1)
+            critic_loss = F.mse_loss(current_q_values, next_q_value)
 
-            # optimize the model
-            critic.zero_grad()
+            # Optimize critic
+            critic_optimizer.zero_grad()
             critic_loss.backward()
             critic_optimizer.step()
 
             if global_step % args.policy_frequency == 0:
-                actor_loss = -qf1(data.observations, actor(data.observations)).mean()
+                # Actor update
+                actor_loss = -critic(data.observations, actor(data.observations)).mean()
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
                 actor_optimizer.step()
-
-                # update the target network
-                for param, target_param in zip(actor.parameters(), target_actor.parameters()):
-                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-                for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
-                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
             if global_step % 100 == 0:
                 writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
@@ -308,7 +301,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        torch.save((actor.state_dict(), qf1.state_dict()), model_path)
+        torch.save((actor.state_dict(), critic.state_dict()), model_path)
         print(f"model saved to {model_path}")
         from cleanrl_utils.evals.ddpg_eval import evaluate
 
@@ -318,7 +311,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             args.env_id,
             eval_episodes=10,
             run_name=f"{run_name}-eval",
-            Model=(Actor, QNetwork),
+            Model=(HJBActor, HJBCritic),
             device=device,
             exploration_noise=args.exploration_noise,
         )

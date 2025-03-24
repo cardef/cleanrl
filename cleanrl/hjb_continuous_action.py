@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import gymnasium as gym
 import numpy as np
 import torch
+from torch import vmap
+from torch.func import grad
 import torchode as to
 import torch.nn as nn
 import torch.nn.functional as F
@@ -297,15 +299,15 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
+            
             data = rb.sample(args.batch_size)
             mb_obs = data.observations
             mb_obs.requires_grad_(True)  # Enable gradient tracking for observations
 
+            compute_value_grad = grad(lambda x: critic(x).squeeze())
+            dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
             # Compute value and gradients
             current_v = critic(mb_obs)
-            grads = torch.autograd.grad(
-                current_v.sum(), mb_obs, create_graph=True, retain_graph=True
-            )[0]
 
             # Get current actions from policy
             current_actions = actor(mb_obs)
@@ -320,7 +322,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 )
 
             # Calculate HJB residual
-            hamiltonian = r + torch.einsum("...i,...i->...", grads, f)
+            hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
             hjb_residual = hamiltonian + np.log(args.gamma) * current_v
             critic_loss = 0.5 * (hjb_residual ** 2).mean()
 
@@ -333,7 +335,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # Compute value gradient for policy improvement
                 with torch.no_grad():
                     current_v = critic(mb_obs)
-                    grads = torch.autograd.grad(current_v.sum(), mb_obs)[0]
+                    dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
                 
                 # Get predicted dynamics
                 current_actions = actor(mb_obs)
@@ -344,7 +346,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 )
                 
                 # Maximize Hamiltonian (HJB optimality condition)
-                actor_loss = -(grads * f).sum(dim=1).mean()
+                actor_loss = -(dVdx * f).sum(dim=1).mean()
                 
                 actor_optimizer.zero_grad()
                 actor_loss.backward()

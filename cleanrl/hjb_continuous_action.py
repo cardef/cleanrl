@@ -152,16 +152,17 @@ class RewardModel(nn.Module):
 class HJBCritic(nn.Module):
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape), 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 1)
-
-    def forward(self, x, a):
-        x = torch.cat([x, a], 1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+        obs_dim = np.array(env.single_observation_space.shape).prod()
+        self.net = nn.Sequential(
+            layer_init(nn.Linear(obs_dim, 256)),
+            nn.SiLU(),
+            layer_init(nn.Linear(256, 256)),
+            nn.SiLU(),
+            layer_init(nn.Linear(256, 1)),
+        )
+    
+    def forward(self, x):
+        return self.net(x).squeeze(-1)  # Output shape: (batch_size,)
 
 
 class HJBActor(nn.Module):
@@ -230,6 +231,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     critic = HJBCritic(envs).to(device)
     critic_optimizer = optim.AdamW(list(critic.parameters()), lr=args.learning_rate)
     actor_optimizer = optim.AdamW(list(actor.parameters()), lr=args.learning_rate)
+    
+    # Initialize dynamic and reward models
+    obs_dim = np.array(envs.single_observation_space.shape).prod()
+    action_dim = np.prod(envs.single_action_space.shape)
+    dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
+    reward_model = RewardModel(obs_dim, action_dim).to(device)
 
     envs.single_observation_space.dtype = np.float32
     rb = ReplayBuffer(
@@ -277,22 +284,53 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
-            with torch.no_grad():
-                next_state_actions = actor(data.next_observations)
-                next_q_values = critic(data.next_observations, next_state_actions)
-                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * next_q_values.view(-1)
+            mb_obs = data.observations
 
-            current_q_values = critic(data.observations, data.actions).view(-1)
-            critic_loss = F.mse_loss(current_q_values, next_q_value)
+            # Compute value and gradients
+            current_v = critic(mb_obs)
+            grads = torch.autograd.grad(
+                current_v.sum(), mb_obs, create_graph=True, retain_graph=True
+            )[0]
 
-            # Optimize critic
+            # Get current actions from policy
+            current_actions = actor(mb_obs)
+
+            # Compute dynamics and rewards
+            with torch.no_grad():  # Assuming fixed models
+                r = reward_model(mb_obs, current_actions)
+                f = dynamic_model.ode_func(
+                    torch.tensor(0.0, device=device),
+                    mb_obs,
+                    current_actions.unsqueeze(1)
+                )
+
+            # Calculate HJB residual
+            hamiltonian = r + torch.einsum("...i,...i->...", grads, f)
+            hjb_residual = hamiltonian + np.log(args.gamma) * current_v
+            critic_loss = 0.5 * (hjb_residual ** 2).mean()
+
+            # Critic optimization
             critic_optimizer.zero_grad()
             critic_loss.backward()
             critic_optimizer.step()
 
             if global_step % args.policy_frequency == 0:
-                # Actor update
-                actor_loss = -critic(data.observations, actor(data.observations)).mean()
+                # Compute value gradient for policy improvement
+                with torch.no_grad():
+                    current_v = critic(mb_obs)
+                    grads = torch.autograd.grad(current_v.sum(), mb_obs)[0]
+                
+                # Get predicted dynamics
+                current_actions = actor(mb_obs)
+                f = dynamic_model.ode_func(
+                    torch.tensor(0.0, device=device),
+                    mb_obs,
+                    current_actions.unsqueeze(1)
+                )
+                
+                # Maximize Hamiltonian (HJB optimality condition)
+                actor_loss = -(grads * f).sum(dim=1).mean()
+                
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
                 actor_optimizer.step()

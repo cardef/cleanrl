@@ -65,15 +65,15 @@ class Args:
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
 
-    model_train_threshold: float = 0.05
+    model_train_threshold: float = 0.001
     """validation loss threshold to consider models accurate enough"""
     model_val_ratio: float = 0.2
     """ratio of validation data for model training"""
-    model_val_patience: int = 3
+    model_val_patience: int = 50
     """patience epochs for early stopping"""
-    model_val_delta: float = 0.001
+    model_val_delta: float = 0.0
     """minimum improvement delta for early stopping"""
-    model_max_epochs: int = 50
+    model_max_epochs: int = 100
     """maximum training epochs for models"""
     model_train_batch_size: int = 1024
     """batch size for training dynamic and reward models"""
@@ -123,15 +123,17 @@ class DynamicModel(nn.Module):
         # TorchODE components
         self.term = to.ODETerm(self.ode_func, with_args=True)
         self.step_method = to.Tsit5(term=self.term)
-        self.step_size_controller = to.IntegralController(atol=1e-6, rtol=1e-3, term=self.term)
+        #self.step_size_controller = to.IntegralController(atol=1e-9, rtol=1e-6, term=self.term)
+        self.step_size_controller = to.FixedStepController()
         self.adjoint = to.AutoDiffAdjoint(
             step_method=self.step_method,
             step_size_controller=self.step_size_controller,
         )
+        
 
     def forward(self, initial_obs, action_sequences):
         batch_size, seq_len = action_sequences.shape[:2]
-        
+        dt0 = torch.full((batch_size,), 0.01)
         # Create time evaluation points for entire trajectory
         t_eval = torch.stack([torch.linspace(0, self.dt*seq_len, seq_len+1)]*batch_size)
         problem = to.InitialValueProblem(
@@ -139,7 +141,7 @@ class DynamicModel(nn.Module):
             t_eval=t_eval.to(initial_obs.device),
             
         )
-        sol = self.adjoint.solve(problem, args=action_sequences)
+        sol = self.adjoint.solve(problem, args=action_sequences, dt0=dt0)
         
         # Return all predicted states except initial
         return sol.ys[:, 1:, :]
@@ -242,7 +244,6 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
     val_acts = actions[indices[split:]]
     val_targets = next_obs[indices[split:]]
     
-    dynamicsoptimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     best_val_loss = float('inf')
     patience_counter = 0
     
@@ -412,16 +413,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     actor = HJBActor(envs).to(device)
     critic = HJBCritic(envs).to(device)
-    critic_optimizer = optim.AdamW(list(critic.parameters()), lr=args.learning_rate*0.1)
-    actor_optimizer = optim.AdamW(list(actor.parameters()), lr=args.learning_rate)
+    critic_optimizer = optim.Adam(list(critic.parameters()), lr=args.learning_rate*0.1)
+    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.learning_rate)
     
     # Initialize dynamic and reward models
     obs_dim = np.array(envs.single_observation_space.shape).prod()
     action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
     reward_model = RewardModel(obs_dim, action_dim).to(device)
-    dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=args.learning_rate)
-    reward_optimizer = optim.AdamW(reward_model.parameters(), lr=args.learning_rate)
+    dynamic_optimizer = optim.Adam(dynamic_model.parameters(), lr=args.learning_rate)
+    reward_optimizer = optim.Adam(reward_model.parameters(), lr=args.learning_rate)
 
     envs.single_observation_space.dtype = np.float32
     rb = ReplayBuffer(
@@ -543,31 +544,32 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
                 actor_optimizer.step()
-            dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
-            # Compute value and gradients
-            current_v = critic(mb_obs)
+            for _ in range(args.policy_frequency):    
+                dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
+                # Compute value and gradients
+                current_v = critic(mb_obs)
 
-            # Get current actions from policy
-            current_actions = actor(mb_obs)
+                # Get current actions from policy
+                current_actions = actor(mb_obs)
 
-            # Compute dynamics and rewards
-            with torch.no_grad():  # Assuming fixed models
-                r = data.rewards.squeeze()
-                f = dynamic_model.ode_func(
-                    torch.tensor(0.0, device=device),
-                    mb_obs,
-                    current_actions.unsqueeze(1)
-                )
+                # Compute dynamics and rewards
+                with torch.no_grad():  # Assuming fixed models
+                    r = reward_model(mb_obs, current_actions)
+                    f = dynamic_model.ode_func(
+                        torch.tensor(0.0, device=device),
+                        mb_obs,
+                        current_actions.unsqueeze(1)
+                    )
 
-            # Calculate HJB residual
-            hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
-            hjb_residual = hamiltonian + np.log(args.gamma) * current_v
-            critic_loss = 0.5 * (hjb_residual ** 2).mean()
+                # Calculate HJB residual
+                hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
+                hjb_residual = hamiltonian + np.log(args.gamma) * current_v
+                critic_loss = 0.5 * (hjb_residual ** 2).mean()
 
-            # Critic optimization
-            critic_optimizer.zero_grad()
-            critic_loss.backward()
-            critic_optimizer.step()
+                # Critic optimization
+                critic_optimizer.zero_grad()
+                critic_loss.backward()
+                critic_optimizer.step()
             if global_step % 100 == 0:
                 writer.add_scalar("losses/critic_values", current_v.mean().item(), global_step)
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)

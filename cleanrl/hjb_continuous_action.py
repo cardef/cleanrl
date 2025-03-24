@@ -249,8 +249,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
     reward_model = RewardModel(obs_dim, action_dim).to(device)
-    dynamic_optimizer = optim.Adam(dynamic_model.parameters(), lr=args.learning_rate)
-    reward_optimizer = optim.Adam(reward_model.parameters(), lr=args.learning_rate)
+    dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=args.learning_rate)
+    reward_optimizer = optim.AdamW(reward_model.parameters(), lr=args.learning_rate)
 
     envs.single_observation_space.dtype = np.float32
     rb = ReplayBuffer(

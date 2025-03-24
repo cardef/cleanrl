@@ -203,10 +203,10 @@ def train_reward_with_validation(model, buffer, args, device, writer, global_ste
             val_loss = F.mse_loss(val_preds, val_targets.squeeze())
             
             # Log validation metrics
-            val_metrics = calculate_metrics(val_preds[:, 0, :], val_targets)
-            writer.add_scalar("losses/dynamic_val_mse", val_metrics["mse"], global_step)
-            writer.add_scalar("metrics/dynamic_val_mae", val_metrics["mae"], global_step)
-            writer.add_scalar("metrics/dynamic_val_r2", val_metrics["r2"], global_step)
+            val_metrics = calculate_metrics(val_preds, val_targets.squeeze())
+            writer.add_scalar("losses/reward_val_mse", val_metrics["mse"], global_step)
+            writer.add_scalar("metrics/reward_val_mae", val_metrics["mae"], global_step)
+            writer.add_scalar("metrics/reward_val_r2", val_metrics["r2"], global_step)
 
             # Early stopping check
             if val_loss < best_val_loss - args.model_val_delta:
@@ -220,8 +220,8 @@ def train_reward_with_validation(model, buffer, args, device, writer, global_ste
     # Final evaluation
     model.eval()
     with torch.no_grad():
-        final_train_metrics = calculate_metrics(model(train_obs, train_acts)[:, 0, :], train_targets)
-        final_val_metrics = calculate_metrics(model(val_obs, val_acts)[:, 0, :], val_targets)
+        final_train_metrics = calculate_metrics(model(train_obs, train_acts), train_targets.squeeze())
+        final_val_metrics = calculate_metrics(model(val_obs, val_acts), val_targets.squeeze())
     
     return {
         "train": final_train_metrics,
@@ -275,10 +275,10 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
             val_loss = F.mse_loss(val_preds[:, 0, :], val_targets)
             
             # Log validation metrics
-            val_metrics = calculate_metrics(val_preds, val_targets.squeeze())
-            writer.add_scalar("losses/reward_val_mse", val_metrics["mse"], global_step)
-            writer.add_scalar("metrics/reward_val_mae", val_metrics["mae"], global_step)
-            writer.add_scalar("metrics/reward_val_r2", val_metrics["r2"], global_step)
+            val_metrics = calculate_metrics(val_preds[:, 0, :], val_targets)
+            writer.add_scalar("losses/dynamic_val_mse", val_metrics["mse"], global_step)
+            writer.add_scalar("metrics/dynamic_val_mae", val_metrics["mae"], global_step)
+            writer.add_scalar("metrics/dynamic_val_r2", val_metrics["r2"], global_step)
 
             # Early stopping check
             if val_loss < best_val_loss - args.model_val_delta:
@@ -292,8 +292,10 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
     # Final evaluation
     model.eval()
     with torch.no_grad():
-        final_train_metrics = calculate_metrics(model(train_obs, train_acts), train_targets.squeeze())
-        final_val_metrics = calculate_metrics(model(val_obs, val_acts), val_targets.squeeze())
+        final_train_preds = model(train_obs, train_acts)[:, 0, :]
+        final_train_metrics = calculate_metrics(final_train_preds, train_targets)
+        final_val_preds = model(val_obs, val_acts)[:, 0, :]
+        final_val_metrics = calculate_metrics(final_val_preds, val_targets)
     
     return {
         "train": final_train_metrics,

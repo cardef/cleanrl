@@ -183,7 +183,7 @@ def train_reward_with_validation(model, buffer, args, device):
         # Training
         model.train()
         preds = model(train_obs, train_acts)
-        train_loss = F.mse_loss(preds, train_targets)
+        train_loss = F.mse_loss(preds, train_targets.squeeze())
         
         reward_optimizer.zero_grad()
         train_loss.backward()
@@ -193,7 +193,7 @@ def train_reward_with_validation(model, buffer, args, device):
         with torch.no_grad():
             model.eval()
             val_preds = model(val_obs, val_acts)
-            val_loss = F.mse_loss(val_preds, val_targets)
+            val_loss = F.mse_loss(val_preds, val_targets.squeeze())
             
             # Early stopping check
             if val_loss < best_val_loss - args.model_val_delta:

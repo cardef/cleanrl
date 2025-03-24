@@ -156,7 +156,7 @@ class DynamicModel(nn.Module):
         # Return all predicted states except initial
         return sol.ys[:, 1:, :]
 
-def train_reward_with_validation(model, buffer, args, device):
+def train_reward_with_validation(model, buffer, args, device, writer, global_step):
     """Train reward model with early stopping using replay buffer data"""
     # Sample and split data
     data = buffer.sample(args.model_train_batch_size)
@@ -185,6 +185,13 @@ def train_reward_with_validation(model, buffer, args, device):
         preds = model(train_obs, train_acts)
         train_loss = F.mse_loss(preds, train_targets.squeeze())
         
+        # Log training metrics
+        with torch.no_grad():
+            train_metrics = calculate_metrics(preds, train_targets.squeeze())
+            writer.add_scalar("losses/reward_train_mse", train_metrics["mse"], global_step)
+            writer.add_scalar("metrics/reward_train_mae", train_metrics["mae"], global_step)
+            writer.add_scalar("metrics/reward_train_r2", train_metrics["r2"], global_step)
+        
         reward_optimizer.zero_grad()
         train_loss.backward()
         reward_optimizer.step()
@@ -195,6 +202,12 @@ def train_reward_with_validation(model, buffer, args, device):
             val_preds = model(val_obs, val_acts)
             val_loss = F.mse_loss(val_preds, val_targets.squeeze())
             
+            # Log validation metrics
+            val_metrics = calculate_metrics(val_preds[:, 0, :], val_targets)
+            writer.add_scalar("losses/dynamic_val_mse", val_metrics["mse"], global_step)
+            writer.add_scalar("metrics/dynamic_val_mae", val_metrics["mae"], global_step)
+            writer.add_scalar("metrics/dynamic_val_r2", val_metrics["r2"], global_step)
+
             # Early stopping check
             if val_loss < best_val_loss - args.model_val_delta:
                 best_val_loss = val_loss
@@ -203,10 +216,19 @@ def train_reward_with_validation(model, buffer, args, device):
                 patience_counter += 1
                 if patience_counter >= args.model_val_patience:
                     break
-                    
-    return best_val_loss.item()
 
-def train_dynamics_with_validation(model, buffer, args, device):
+    # Final evaluation
+    model.eval()
+    with torch.no_grad():
+        final_train_metrics = calculate_metrics(model(train_obs, train_acts)[:, 0, :], train_targets)
+        final_val_metrics = calculate_metrics(model(val_obs, val_acts)[:, 0, :], val_targets)
+    
+    return {
+        "train": final_train_metrics,
+        "val": final_val_metrics
+    }
+
+def train_dynamics_with_validation(model, buffer, args, device, writer, global_step):
     # Sample initial data
     data = buffer.sample(args.model_train_batch_size)
     obs = data.observations
@@ -235,6 +257,13 @@ def train_dynamics_with_validation(model, buffer, args, device):
         pred_trajectories = model(train_obs, train_acts)
         train_loss = F.mse_loss(pred_trajectories[:, 0, :], train_targets)
         
+        # Calculate and log training metrics
+        with torch.no_grad():
+            train_metrics = calculate_metrics(pred_trajectories[:, 0, :], train_targets)
+            writer.add_scalar("losses/dynamic_train_mse", train_metrics["mse"], global_step)
+            writer.add_scalar("metrics/dynamic_train_mae", train_metrics["mae"], global_step)
+            writer.add_scalar("metrics/dynamic_train_r2", train_metrics["r2"], global_step)
+        
         dynamic_optimizer.zero_grad()
         train_loss.backward()
         dynamic_optimizer.step()
@@ -245,6 +274,12 @@ def train_dynamics_with_validation(model, buffer, args, device):
             val_preds = model(val_obs, val_acts)
             val_loss = F.mse_loss(val_preds[:, 0, :], val_targets)
             
+            # Log validation metrics
+            val_metrics = calculate_metrics(val_preds, val_targets.squeeze())
+            writer.add_scalar("losses/reward_val_mse", val_metrics["mse"], global_step)
+            writer.add_scalar("metrics/reward_val_mae", val_metrics["mae"], global_step)
+            writer.add_scalar("metrics/reward_val_r2", val_metrics["r2"], global_step)
+
             # Early stopping check
             if val_loss < best_val_loss - args.model_val_delta:
                 best_val_loss = val_loss
@@ -253,8 +288,32 @@ def train_dynamics_with_validation(model, buffer, args, device):
                 patience_counter += 1
                 if patience_counter >= args.model_val_patience:
                     break
-                    
-    return best_val_loss.item()
+
+    # Final evaluation
+    model.eval()
+    with torch.no_grad():
+        final_train_metrics = calculate_metrics(model(train_obs, train_acts), train_targets.squeeze())
+        final_val_metrics = calculate_metrics(model(val_obs, val_acts), val_targets.squeeze())
+    
+    return {
+        "train": final_train_metrics,
+        "val": final_val_metrics
+    }
+
+def calculate_metrics(preds, targets):
+    mse = F.mse_loss(preds, targets)
+    mae = F.l1_loss(preds, targets)
+    
+    # Calculate R-squared
+    ss_res = torch.sum((targets - preds) ** 2)
+    ss_tot = torch.sum((targets - torch.mean(targets)) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else 1.0
+    
+    return {
+        "mse": mse.item(),
+        "mae": mae.item(),
+        "r2": r2.item() if isinstance(r2, torch.Tensor) else r2
+    }
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     nn.init.orthogonal_(layer.weight, std)
@@ -421,24 +480,32 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 dyn_val_data = rb.sample(args.batch_size)
                 dyn_val_actions = dyn_val_data.actions.unsqueeze(1)
                 dyn_val_preds = dynamic_model(dyn_val_data.observations, dyn_val_actions)
-                dyn_current_loss = F.mse_loss(dyn_val_preds[:, 0, :], dyn_val_data.next_observations).item()
+                dyn_metrics = calculate_metrics(dyn_val_preds[:, 0, :], dyn_val_data.next_observations)
+                dyn_current_loss = dyn_metrics["mse"]
+                writer.add_scalar("metrics/dynamic_val_mse", dyn_metrics["mse"], global_step)
+                writer.add_scalar("metrics/dynamic_val_mae", dyn_metrics["mae"], global_step)
+                writer.add_scalar("metrics/dynamic_val_r2", dyn_metrics["r2"], global_step)
             
             if dyn_current_loss > args.model_train_threshold:
                 print(f"Training dynamics model (loss: {dyn_current_loss:.4f})")
-                dyn_final_loss = train_dynamics_with_validation(dynamic_model, rb, args, device)
-                if dyn_final_loss > args.model_train_threshold:
+                dyn_results = train_dynamics_with_validation(dynamic_model, rb, args, device, writer, global_step)
+                if dyn_results["val"]["mse"] > args.model_train_threshold:
                     skip_update = True
 
             # Check and train reward model
             with torch.no_grad():
                 rew_val_data = rb.sample(args.batch_size)
                 rew_val_preds = reward_model(rew_val_data.observations, rew_val_data.actions)
-                rew_current_loss = F.mse_loss(rew_val_preds, rew_val_data.rewards).item()
+                rew_metrics = calculate_metrics(rew_val_preds, rew_val_data.rewards.squeeze())
+                rew_current_loss = rew_metrics["mse"]
+                writer.add_scalar("metrics/reward_val_mse", rew_metrics["mse"], global_step)
+                writer.add_scalar("metrics/reward_val_mae", rew_metrics["mae"], global_step)
+                writer.add_scalar("metrics/reward_val_r2", rew_metrics["r2"], global_step)
             
             if rew_current_loss > args.model_train_threshold:
                 print(f"Training reward model (loss: {rew_current_loss:.4f})")
-                rew_final_loss = train_reward_with_validation(reward_model, rb, args, device)
-                if rew_final_loss > args.model_train_threshold:
+                rew_results = train_reward_with_validation(reward_model, rb, args, device, writer, global_step)
+                if rew_results["val"]["mse"] > args.model_train_threshold:
                     skip_update = True
 
             if skip_update:

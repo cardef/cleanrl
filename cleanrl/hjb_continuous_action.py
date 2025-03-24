@@ -552,7 +552,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
             # Compute dynamics and rewards
             with torch.no_grad():  # Assuming fixed models
-                r = data.rewards.squeeze()  # ACTUAL rewards from buffer
+                r = data.rewards.squeeze()
                 f = dynamic_model.ode_func(
                     torch.tensor(0.0, device=device),
                     mb_obs,

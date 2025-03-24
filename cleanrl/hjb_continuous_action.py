@@ -235,9 +235,9 @@ def train_dynamics_with_validation(model, buffer, args, device):
         pred_trajectories = model(train_obs, train_acts)
         train_loss = F.mse_loss(pred_trajectories[:, 0, :], train_targets)
         
-        optimizer.zero_grad()
+        dynamic_optimizer.zero_grad()
         train_loss.backward()
-        optimizer.step()
+        dynamic_optimizer.step()
         
         # Validation
         with torch.no_grad():

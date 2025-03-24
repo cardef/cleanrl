@@ -77,7 +77,7 @@ class Args:
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
 
-    model_train_threshold: float = 0.01
+    model_train_threshold: float = 0.1
     """validation loss threshold to consider models accurate enough"""
     model_val_ratio: float = 0.2
     """ratio of validation data for model training"""

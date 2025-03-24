@@ -77,6 +77,19 @@ class Args:
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
 
+    model_train_threshold: float = 0.01
+    """validation loss threshold to consider models accurate enough"""
+    model_val_ratio: float = 0.2
+    """ratio of validation data for model training"""
+    model_val_patience: int = 3
+    """patience epochs for early stopping"""
+    model_val_delta: float = 0.001
+    """minimum improvement delta for early stopping"""
+    model_max_epochs: int = 50
+    """maximum training epochs for models"""
+    model_train_batch_size: int = 1024
+    """batch size for training dynamic and reward models"""
+
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
@@ -142,6 +155,56 @@ class DynamicModel(nn.Module):
         
         # Return all predicted states except initial
         return sol.ys[:, 1:, :]
+
+def train_dynamics_with_validation(model, buffer, args, device):
+    # Sample initial data
+    data = buffer.sample(args.model_train_batch_size)
+    obs = data.observations
+    actions = data.actions.unsqueeze(1)  # Add sequence dimension [B, 1, A]
+    next_obs = data.next_observations
+    
+    # Split train/validation
+    indices = torch.randperm(len(obs))
+    split = int(len(obs) * (1 - args.model_val_ratio))
+    
+    train_obs = obs[indices[:split]]
+    train_acts = actions[indices[:split]]
+    train_targets = next_obs[indices[:split]]
+    
+    val_obs = obs[indices[split:]]
+    val_acts = actions[indices[split:]]
+    val_targets = next_obs[indices[split:]]
+    
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(args.model_max_epochs):
+        # Training
+        model.train()
+        pred_trajectories = model(train_obs, train_acts)
+        train_loss = F.mse_loss(pred_trajectories[:, 0, :], train_targets)
+        
+        optimizer.zero_grad()
+        train_loss.backward()
+        optimizer.step()
+        
+        # Validation
+        with torch.no_grad():
+            model.eval()
+            val_preds = model(val_obs, val_acts)
+            val_loss = F.mse_loss(val_preds[:, 0, :], val_targets)
+            
+            # Early stopping check
+            if val_loss < best_val_loss - args.model_val_delta:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= args.model_val_patience:
+                    break
+                    
+    return best_val_loss.item()
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     nn.init.orthogonal_(layer.weight, std)
@@ -300,6 +363,23 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             
+            # Check current model accuracy
+            with torch.no_grad():
+                val_data = rb.sample(args.batch_size)
+                val_actions = val_data.actions.unsqueeze(1)  # Add sequence dimension
+                val_preds = dynamic_model(val_data.observations, val_actions)
+                current_loss = F.mse_loss(val_preds[:, 0, :], val_data.next_observations).item()
+            
+            # Train model if needed
+            if current_loss > args.model_train_threshold:
+                print(f"Training dynamics model (current loss: {current_loss:.4f})")
+                final_loss = train_dynamics_with_validation(dynamic_model, rb, args, device)
+                
+                if final_loss > args.model_train_threshold:
+                    print(f"Model still inaccurate ({final_loss:.4f}), skipping agent update")
+                    continue
+
+            # Proceed with normal agent training
             data = rb.sample(args.batch_size)
             mb_obs = data.observations
             mb_obs.requires_grad_(True)  # Enable gradient tracking for observations

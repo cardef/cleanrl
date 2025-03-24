@@ -336,7 +336,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 actor_optimizer.step()
 
             if global_step % 100 == 0:
-                writer.add_scalar("losses/critic_values", current_q_values.mean().item(), global_step)
+                writer.add_scalar("losses/critic_values", current_v.mean().item(), global_step)
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
                 print("SPS:", int(global_step / (time.time() - start_time)))

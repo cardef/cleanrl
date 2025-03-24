@@ -22,18 +22,6 @@ from torch.utils.tensorboard import SummaryWriter
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    model_train_batch_size: int = 1024
-    """batch size for training dynamic and reward models"""
-    model_val_ratio: float = 0.2
-    """ratio of validation data for model training"""
-    model_train_threshold: float = 0.01  
-    """validation loss threshold to consider models accurate enough"""
-    model_val_patience: int = 5
-    """patience epochs for early stopping"""
-    model_val_delta: float = 0.001
-    """minimum improvement delta for early stopping"""
-    model_max_epochs: int = 50
-    """maximum training epochs for models"""
     seed: int = 1
     """seed of the experiment"""
     torch_deterministic: bool = True
@@ -72,7 +60,7 @@ class Args:
     """the scale of exploration noise"""
     learning_starts: int = 25e3
     """timestep to start learning"""
-    policy_frequency: int = 2
+    policy_frequency: int = 1
     """the frequency of training policy (delayed)"""
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
@@ -536,6 +524,25 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             mb_obs.requires_grad_(True)  # Enable gradient tracking for observations
 
             compute_value_grad = grad(lambda x: critic(x).squeeze())
+            for _ in range(args.policy_frequency):
+                # Compute value gradient for policy improvement
+                with torch.no_grad():
+                    current_v = critic(mb_obs)
+                    dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
+                # Get predicted dynamics
+                current_actions = actor(mb_obs)
+                f = dynamic_model.ode_func(
+                    torch.tensor(0.0, device=device),
+                    mb_obs,
+                    current_actions.unsqueeze(1)
+                )
+                r = reward_model(mb_obs, current_actions)
+                # Maximize Hamiltonian (HJB optimality condition)
+                hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
+                actor_loss = (-hamiltonian).mean()
+                actor_optimizer.zero_grad()
+                actor_loss.backward()
+                actor_optimizer.step()
             dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
             # Compute value and gradients
             current_v = critic(mb_obs)
@@ -545,7 +552,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
             # Compute dynamics and rewards
             with torch.no_grad():  # Assuming fixed models
-                r = reward_model(mb_obs, current_actions)
+                r = reward_model(mb_obs, current_actions) #use actual rewards, not predicted ai!
                 f = dynamic_model.ode_func(
                     torch.tensor(0.0, device=device),
                     mb_obs,
@@ -561,28 +568,6 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             critic_optimizer.zero_grad()
             critic_loss.backward()
             critic_optimizer.step()
-
-            if global_step % args.policy_frequency == 0:
-                # Compute value gradient for policy improvement
-                with torch.no_grad():
-                    current_v = critic(mb_obs)
-                    dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
-                
-                # Get predicted dynamics
-                current_actions = actor(mb_obs)
-                f = dynamic_model.ode_func(
-                    torch.tensor(0.0, device=device),
-                    mb_obs,
-                    current_actions.unsqueeze(1)
-                )
-                
-                # Maximize Hamiltonian (HJB optimality condition)
-                actor_loss = -(dVdx * f).sum(dim=1).mean()
-                
-                actor_optimizer.zero_grad()
-                actor_loss.backward()
-                actor_optimizer.step()
-
             if global_step % 100 == 0:
                 writer.add_scalar("losses/critic_values", current_v.mean().item(), global_step)
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)

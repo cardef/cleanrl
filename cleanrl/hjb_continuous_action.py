@@ -115,7 +115,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
 # ALGO LOGIC: initialize agent here:
 
-class ODEFunc(nn.Module):
+class ODEFFunc(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
@@ -129,11 +129,8 @@ class ODEFunc(nn.Module):
         )
         self.dt = 0.05  # Should match environment timestep
 
-    def forward(self, t, x, a_sequence):
-        # Calculate which action to use based on current time
-        idx = torch.clamp((t / self.dt).long(), 0, a_sequence.size(1)-1)
-        # Ensure action has correct dimensionality
-        a = a_sequence[torch.arange(x.size(0)), idx].unsqueeze(-1) if a_sequence.dim() == 2 else a_sequence[torch.arange(x.size(0)), idx]
+    def forward(self, t, x, a):
+        # Directly use the provided action for single transition
         return self.net(torch.cat([x, a], dim=-1))
 
 class DynamicModel(nn.Module):
@@ -145,28 +142,25 @@ class DynamicModel(nn.Module):
         # TorchODE components
         self.term = to.ODETerm(self.ode_func, with_args=True)
         self.step_method = to.Tsit5(term=self.term)
-        #self.step_size_controller = to.IntegralController(atol=1e-9, rtol=1e-6, term=self.term)
         self.step_size_controller = to.FixedStepController()
         self.adjoint = to.AutoDiffAdjoint(
             step_method=self.step_method,
             step_size_controller=self.step_size_controller,
         )
-        
 
-    def forward(self, initial_obs, action_sequences):
-        batch_size, seq_len = action_sequences.shape[:2]
+    def forward(self, initial_obs, actions):
+        batch_size = initial_obs.shape[0]
         dt0 = torch.full((batch_size,), 0.01)
-        # Create time evaluation points for entire trajectory
-        t_eval = torch.stack([torch.linspace(0, self.dt*seq_len, seq_len+1)]*batch_size)
+        # Single step evaluation (t=0 to t=dt)
+        t_eval = torch.tensor([0.0, self.dt], device=initial_obs.device)
         problem = to.InitialValueProblem(
             y0=initial_obs,
-            t_eval=t_eval.to(initial_obs.device),
-            
+            t_eval=t_eval,
         )
-        sol = self.adjoint.solve(problem, args=action_sequences, dt0=dt0)
+        sol = self.adjoint.solve(problem, args=actions, dt0=dt0)
         
-        # Return all predicted states except initial
-        return sol.ys[:, 1:, :]
+        # Return only the final state prediction
+        return sol.ys[:, 1, :]  # Shape: (batch_size, obs_dim)
 
 def train_reward_with_validation(model, buffer, args, device, writer, global_step):
     """Train reward model with early stopping using replay buffer data"""
@@ -247,10 +241,10 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
     # Filter out terminal transitions
     non_terminal_mask = data.dones.squeeze(-1) == 0
     obs = data.observations[non_terminal_mask]
-    actions = data.actions[non_terminal_mask].unsqueeze(1)  # Add sequence dimension [B, 1, A]
+    actions = data.actions[non_terminal_mask]  # Remove unsqueeze for sequence dimension
     next_obs = data.next_observations[non_terminal_mask]
     
-    if len(obs) == 0:  # Handle empty case
+    if len(obs) == 0:
         print("No non-terminal transitions for dynamics training")
         return {"train": {"mse": 0, "mae": 0, "r2": 0}, "val": {"mse": 0, "mae": 0, "r2": 0}}
     
@@ -272,12 +266,12 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
     for epoch in range(args.reward_max_epochs):
         # Training
         model.train()
-        pred_trajectories = model(train_obs, train_acts)
-        train_loss = F.mse_loss(pred_trajectories[:, 0, :], train_targets)
+        preds = model(train_obs, train_acts)  # Direct single-step predictions
+        train_loss = F.mse_loss(preds, train_targets)
         
         # Calculate and log training metrics
         with torch.no_grad():
-            train_metrics = calculate_metrics(pred_trajectories[:, 0, :], train_targets)
+            train_metrics = calculate_metrics(preds, train_targets)
             writer.add_scalar("losses/dynamic_train_mse", train_metrics["mse"], global_step)
             writer.add_scalar("metrics/dynamic_train_mae", train_metrics["mae"], global_step)
             writer.add_scalar("metrics/dynamic_train_r2", train_metrics["r2"], global_step)
@@ -290,10 +284,10 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
         with torch.no_grad():
             model.eval()
             val_preds = model(val_obs, val_acts)
-            val_loss = F.mse_loss(val_preds[:, 0, :], val_targets)
+            val_loss = F.mse_loss(val_preds, val_targets)
             
             # Log validation metrics
-            val_metrics = calculate_metrics(val_preds[:, 0, :], val_targets)
+            val_metrics = calculate_metrics(val_preds, val_targets)
             writer.add_scalar("losses/dynamic_val_mse", val_metrics["mse"], global_step)
             writer.add_scalar("metrics/dynamic_val_mae", val_metrics["mae"], global_step)
             writer.add_scalar("metrics/dynamic_val_r2", val_metrics["r2"], global_step)
@@ -310,9 +304,9 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
     # Final evaluation
     model.eval()
     with torch.no_grad():
-        final_train_preds = model(train_obs, train_acts)[:, 0, :]
+        final_train_preds = model(train_obs, train_acts)
         final_train_metrics = calculate_metrics(final_train_preds, train_targets)
-        final_val_preds = model(val_obs, val_acts)[:, 0, :]
+        final_val_preds = model(val_obs, val_acts)
         final_val_metrics = calculate_metrics(final_val_preds, val_targets)
     
     return {

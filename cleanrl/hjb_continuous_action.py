@@ -115,7 +115,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 
 # ALGO LOGIC: initialize agent here:
 
-class ODEFFunc(nn.Module):
+class ODEFunc(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(

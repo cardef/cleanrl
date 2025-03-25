@@ -466,7 +466,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
             with torch.no_grad():
-                actions = actor(torch.Tensor(obs).to(device))
+                # Use EMA actor for more stable exploration
+                actions = ema_actor.module(torch.Tensor(obs).to(device))
                 actions += torch.normal(0, actor.action_scale * args.exploration_noise)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
@@ -551,59 +552,62 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             compute_value_grad = grad(lambda x: critic(x).squeeze())
 
             for _ in range(args.policy_frequency): 
-                # Compute value gradient for policy improvement
+                # Compute value gradient using EMA critic
+                compute_value_grad = grad(lambda x: ema_critic.module(x).squeeze())
+                
                 with torch.no_grad():
-                    current_v = critic(mb_obs)
+                    current_v = ema_critic.module(mb_obs)
                     dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
-                # Get predicted dynamics
-                current_actions = actor(mb_obs)
+                    current_actions = ema_actor.module(mb_obs)  # EMA-based actions
+
+                # Get predicted dynamics with EMA policy
                 f = dynamic_model.ode_func(
                     torch.tensor(0.0, device=device),
                     mb_obs,
                     current_actions
                 )
                 r = reward_model(mb_obs, current_actions)
-                # Maximize Hamiltonian (HJB optimality condition)
+                
+                # Hamiltonian calculation with EMA components
                 hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
                 actor_loss = (-hamiltonian).mean()
+                
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
                 if args.grad_norm_clip is not None:
                     nn.utils.clip_grad_norm_(actor.parameters(), args.grad_norm_clip)
                 actor_optimizer.step()
-                # Update EMA after each optimization step
-                ema_actor.update_parameters(actor)
+                ema_actor.update_parameters(actor)  # Update EMA after optimization
 
             for _ in range(args.policy_frequency):   
+                # Compute gradients through EMA critic
+                compute_value_grad = grad(lambda x: ema_critic.module(x).squeeze())
                 dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
-                # Compute value and gradients
-                current_v = critic(mb_obs)
-
-                # Get current actions from policy
-                current_actions = actor(mb_obs)
-
-                # Compute dynamics and rewards
-                with torch.no_grad():  # Assuming fixed models
-                    r = reward_model(mb_obs, current_actions)
-                    f = dynamic_model.ode_func(
-                        torch.tensor(0.0, device=device),
-                        mb_obs,
-                        current_actions
-                    )
-
-                # Calculate HJB residual
+                
+                # Get EMA-based actions for consistency
+                with torch.no_grad():
+                    current_actions = ema_actor.module(mb_obs)
+                
+                # Compute dynamics and rewards with EMA policy
+                r = reward_model(mb_obs, current_actions)
+                f = dynamic_model.ode_func(
+                    torch.tensor(0.0, device=device),
+                    mb_obs,
+                    current_actions
+                )
+                
+                # HJB residual with EMA values
                 hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
+                current_v = ema_critic.module(mb_obs)
                 hjb_residual = hamiltonian - (np.log(args.gamma)/0.05) * current_v
                 critic_loss = 0.5 * (hjb_residual ** 2).mean()
-
-                # Critic optimization
+                
                 critic_optimizer.zero_grad()
                 critic_loss.backward()
                 if args.grad_norm_clip is not None:
                     nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
                 critic_optimizer.step()
-                # Update EMA after each optimization step
-                ema_critic.update_parameters(critic)
+                ema_critic.update_parameters(critic)  # Update EMA after optimization
 
             
             

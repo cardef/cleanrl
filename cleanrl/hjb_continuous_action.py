@@ -66,7 +66,7 @@ class Args:
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
 
-    model_train_threshold: float = 0.001
+    model_train_threshold: float = 0.1
     """validation loss threshold to consider models accurate enough"""
     model_val_ratio: float = 0.2
     """ratio of validation data for model training"""
@@ -77,7 +77,7 @@ class Args:
     model_max_epochs: int = 100
     """maximum training epochs for models"""
     model_train_batch_size: int = 1024
-    """batch size for training dynamic and reward models"""
+    """batch size for training dynamic and reward models""" #duplicate these arguemtns for dynamic and reward models ai!
     grad_norm_clip: Optional[float] = 0.5
     """gradient norm clipping threshold (None for no clipping)"""
 
@@ -102,11 +102,13 @@ class ODEFunc(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, 64),
+            nn.Linear(obs_dim + action_dim, 256),
             nn.Softplus(),
-            nn.Linear(64, 64),
+            nn.Linear(256, 256),
             nn.Softplus(),
-            nn.Linear(64, obs_dim),
+            nn.Linear(256, 256),
+            nn.Softplus(),
+            nn.Linear(256, obs_dim),
         )
         self.dt = 0.05  # Should match environment timestep
 
@@ -329,6 +331,8 @@ class RewardModel(nn.Module):
             nn.SiLU(),
             layer_init(nn.Linear(256, 256)),
             nn.SiLU(),
+            layer_init(nn.Linear(256, 256)),
+            nn.SiLU(),
             layer_init(nn.Linear(256, 1)),
         )
     
@@ -416,8 +420,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     actor = HJBActor(envs).to(device)
     critic = HJBCritic(envs).to(device)
-    critic_optimizer = optim.Adam(list(critic.parameters()), lr=args.learning_rate*0.1)
-    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.learning_rate)
+    critic_optimizer = optim.AdamW(list(critic.parameters()), lr=args.learning_rate)
+    actor_optimizer = optim.AdamW(list(actor.parameters()), lr=args.learning_rate)
     
     # Initialize dynamic and reward models
     obs_dim = np.array(envs.single_observation_space.shape).prod()

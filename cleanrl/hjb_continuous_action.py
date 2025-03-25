@@ -51,17 +51,17 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    buffer_size: int = int(1e6)
+    buffer_size: int = int(1e7)
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    batch_size: int = 256
+    batch_size: int = 2048
     """the batch size of sample from the reply memory"""
     exploration_noise: float = 0.1
     """the scale of exploration noise"""
     learning_starts: int = 25e3
     """timestep to start learning"""
-    policy_frequency: int = 2
+    policy_frequency: int = 50
     """the frequency of training policy (delayed)"""
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
@@ -152,7 +152,7 @@ class DynamicModel(nn.Module):
         batch_size = initial_obs.shape[0]
         dt0 = torch.full((batch_size,), 0.01)
         # Single step evaluation (t=0 to t=dt)
-        t_eval = torch.tensor([0.0, self.dt], device=initial_obs.device)
+        t_eval = torch.tensor([0.0, self.dt], device=initial_obs.device).repeat((batch_size, 1))
         problem = to.InitialValueProblem(
             y0=initial_obs,
             t_eval=t_eval,
@@ -329,22 +329,18 @@ def calculate_metrics(preds, targets):
         "r2": r2.item() if isinstance(r2, torch.Tensor) else r2
     }
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    nn.init.orthogonal_(layer.weight, std)
-    nn.init.constant_(layer.bias, bias_const)
-    return layer
 
 class RewardModel(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
-            layer_init(nn.Linear(obs_dim + action_dim, 256)),
+            nn.Linear(obs_dim + action_dim, 256),
             nn.SiLU(),
-            layer_init(nn.Linear(256, 256)),
+            nn.Linear(256, 256),
             nn.SiLU(),
-            layer_init(nn.Linear(256, 256)),
+            nn.Linear(256, 256),
             nn.SiLU(),
-            layer_init(nn.Linear(256, 1)),
+            nn.Linear(256, 1),
         )
     
     def forward(self, obs, action):
@@ -355,16 +351,15 @@ class HJBCritic(nn.Module):
     def __init__(self, env):
         super().__init__()
         obs_dim = np.array(env.single_observation_space.shape).prod()
-        self.net = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 256)),
-            nn.SiLU(),
-            layer_init(nn.Linear(256, 256)),
-            nn.SiLU(),
-            layer_init(nn.Linear(256, 1)),
-        )
+        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)
     
     def forward(self, x):
-        return self.net(x).squeeze(-1)  # Output shape: (batch_size,)
+        x = F.silu(self.fc1(x))
+        x = F.silu(self.fc2(x))
+        x = self.fc3(x).squeeze(-1)
+        return x
 
 
 class HJBActor(nn.Module):
@@ -382,8 +377,8 @@ class HJBActor(nn.Module):
         )
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = F.silu(self.fc1(x))
+        x = F.silu(self.fc2(x))
         x = torch.tanh(self.fc_mu(x))
         return x * self.action_scale + self.action_bias
 
@@ -439,8 +434,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim).to(device)
     reward_model = RewardModel(obs_dim, action_dim).to(device)
-    dynamic_optimizer = optim.Adam(dynamic_model.parameters(), lr=args.learning_rate)
-    reward_optimizer = optim.Adam(reward_model.parameters(), lr=args.learning_rate)
+    dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=args.learning_rate)
+    reward_optimizer = optim.AdamW(reward_model.parameters(), lr=args.learning_rate)
 
     envs.single_observation_space.dtype = np.float32
     rb = ReplayBuffer(
@@ -498,14 +493,14 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # Filter out terminal transitions
                 non_terminal_mask = dyn_val_data.dones.squeeze(-1) == 0
                 dyn_val_obs = dyn_val_data.observations[non_terminal_mask]
-                dyn_val_acts = dyn_val_data.actions[non_terminal_mask].unsqueeze(1)
+                dyn_val_acts = dyn_val_data.actions[non_terminal_mask]
                 dyn_val_next_obs = dyn_val_data.next_observations[non_terminal_mask]
                 
                 if len(dyn_val_obs) == 0:  # Handle empty case
                     dyn_current_loss = float('inf')
                 else:
                     dyn_val_preds = dynamic_model(dyn_val_obs, dyn_val_acts)
-                    dyn_metrics = calculate_metrics(dyn_val_preds[:, 0, :], dyn_val_next_obs)
+                    dyn_metrics = calculate_metrics(dyn_val_preds, dyn_val_next_obs)
                     dyn_current_loss = dyn_metrics["mse"]
                 writer.add_scalar("metrics/dynamic_val_mse", dyn_metrics["mse"], global_step)
                 writer.add_scalar("metrics/dynamic_val_mae", dyn_metrics["mae"], global_step)
@@ -543,7 +538,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             mb_obs.requires_grad_(True)  # Enable gradient tracking for observations
 
             compute_value_grad = grad(lambda x: critic(x).squeeze())
-            for _ in range(args.policy_frequency):
+
+            for _ in range(args.policy_frequency): 
                 # Compute value gradient for policy improvement
                 with torch.no_grad():
                     current_v = critic(mb_obs)
@@ -553,7 +549,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 f = dynamic_model.ode_func(
                     torch.tensor(0.0, device=device),
                     mb_obs,
-                    current_actions.unsqueeze(1)
+                    current_actions
                 )
                 r = reward_model(mb_obs, current_actions)
                 # Maximize Hamiltonian (HJB optimality condition)
@@ -564,7 +560,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 if args.grad_norm_clip is not None:
                     nn.utils.clip_grad_norm_(actor.parameters(), args.grad_norm_clip)
                 actor_optimizer.step()
-            for _ in range(args.policy_frequency):    
+
+            for _ in range(args.policy_frequency):   
                 dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
                 # Compute value and gradients
                 current_v = critic(mb_obs)
@@ -578,7 +575,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     f = dynamic_model.ode_func(
                         torch.tensor(0.0, device=device),
                         mb_obs,
-                        current_actions.unsqueeze(1)
+                        current_actions
                     )
 
                 # Calculate HJB residual
@@ -592,7 +589,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 if args.grad_norm_clip is not None:
                     nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
                 critic_optimizer.step()
-            if global_step % 100 == 0:
+
+            
+            
+                
+            if global_step % 1 == 0:
                 writer.add_scalar("losses/critic_values", current_v.mean().item(), global_step)
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)

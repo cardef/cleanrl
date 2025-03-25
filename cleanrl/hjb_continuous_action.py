@@ -68,7 +68,7 @@ class Args:
 
     dynamic_train_threshold: float = 0.1
     """validation loss threshold to consider dynamic model accurate enough"""
-    reward_train_threshold: float = 0.1
+    reward_train_threshold: float = 0.005
     """validation loss threshold to consider reward model accurate enough"""
     
     dynamic_val_ratio: float = 0.2
@@ -127,7 +127,7 @@ class ODEFunc(nn.Module):
             nn.Softplus(),
             nn.Linear(256, obs_dim),
         )
-        self.dt = 0.05  # Should match environment timestep
+        self.dt = 0.04  # Should match environment timestep
 
     def forward(self, t, x, a_sequence):
         # Calculate which action to use based on current time
@@ -140,7 +140,7 @@ class DynamicModel(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.ode_func = ODEFunc(obs_dim, action_dim)
-        self.dt = 0.05
+        self.dt = 0.04
         
         # TorchODE components
         self.term = to.ODETerm(self.ode_func, with_args=True)

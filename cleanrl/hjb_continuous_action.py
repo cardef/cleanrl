@@ -22,7 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
-    ema_decay: float = 0.999  # EMA decay rate (typically 0.999-0.9999)
+    ema_decay: float = 0.995  # EMA decay rate (typically 0.999-0.9999)
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -62,7 +62,7 @@ class Args:
     """the scale of exploration noise"""
     learning_starts: int = 25e3
     """timestep to start learning"""
-    policy_frequency: int = 50
+    policy_frequency: int = 1
     """the frequency of training policy (delayed)"""
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
@@ -467,7 +467,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         else:
             with torch.no_grad():
                 # Use EMA actor for more stable exploration
-                actions = ema_actor.module(torch.Tensor(obs).to(device))
+                actions = ema_actor(torch.Tensor(obs).to(device))
                 actions += torch.normal(0, actor.action_scale * args.exploration_noise)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
@@ -553,12 +553,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
             for _ in range(args.policy_frequency): 
                 # Compute value gradient using EMA critic
-                compute_value_grad = grad(lambda x: ema_critic.module(x).squeeze())
+                compute_value_grad = grad(lambda x: ema_critic(x).squeeze())
                 
                 with torch.no_grad():
-                    current_v = ema_critic.module(mb_obs)
+                    current_v = ema_critic(mb_obs)
                     dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
-                    current_actions = ema_actor.module(mb_obs)  # EMA-based actions
+                    current_actions = actor(mb_obs)  # EMA-based actions
 
                 # Get predicted dynamics with EMA policy
                 f = dynamic_model.ode_func(
@@ -581,12 +581,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
             for _ in range(args.policy_frequency):   
                 # Compute gradients through EMA critic
-                compute_value_grad = grad(lambda x: ema_critic.module(x).squeeze())
+                compute_value_grad = grad(lambda x: critic(x).squeeze())
                 dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
                 
                 # Get EMA-based actions for consistency
                 with torch.no_grad():
-                    current_actions = ema_actor.module(mb_obs)
+                    current_actions = ema_actor(mb_obs)
                 
                 # Compute dynamics and rewards with EMA policy
                 r = reward_model(mb_obs, current_actions)
@@ -598,7 +598,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 
                 # HJB residual with EMA values
                 hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
-                current_v = ema_critic.module(mb_obs)
+                current_v = critic(mb_obs)
                 hjb_residual = hamiltonian - (np.log(args.gamma)/0.05) * current_v
                 critic_loss = 0.5 * (hjb_residual ** 2).mean()
                 

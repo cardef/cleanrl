@@ -61,14 +61,14 @@ class Args:
     """the scale of exploration noise"""
     learning_starts: int = 25e3
     """timestep to start learning"""
-    policy_frequency: int = 20
+    policy_frequency: int = 2
     """the frequency of training policy (delayed)"""
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
 
-    dynamic_train_threshold: float = 0.1
+    dynamic_train_threshold: float = 0.01
     """validation loss threshold to consider dynamic model accurate enough"""
-    reward_train_threshold: float = 0.005
+    reward_train_threshold: float = 0.001
     """validation loss threshold to consider reward model accurate enough"""
     
     dynamic_val_ratio: float = 0.2

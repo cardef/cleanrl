@@ -127,7 +127,7 @@ class ODEFunc(nn.Module):
             nn.Softplus(),
             nn.Linear(256, obs_dim),
         )
-        self.dt = 0.04  # Should match environment timestep
+        self.dt = 0.05  # Should match environment timestep
 
     def forward(self, t, x, a_sequence):
         # Calculate which action to use based on current time
@@ -140,7 +140,7 @@ class DynamicModel(nn.Module):
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.ode_func = ODEFunc(obs_dim, action_dim)
-        self.dt = 0.04
+        self.dt = 0.05
         
         # TorchODE components
         self.term = to.ODETerm(self.ode_func, with_args=True)
@@ -589,7 +589,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                 # Calculate HJB residual
                 hamiltonian = r + torch.einsum("...i,...i->...", dVdx, f)
-                hjb_residual = hamiltonian + np.log(args.gamma) * current_v
+                hjb_residual = hamiltonian - (np.log(args.gamma)/0.05) * current_v
                 critic_loss = 0.5 * (hjb_residual ** 2).mean()
 
                 # Critic optimization

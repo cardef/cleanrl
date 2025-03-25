@@ -66,16 +66,31 @@ class Args:
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
 
-    model_train_threshold: float = 0.1
-    """validation loss threshold to consider models accurate enough"""
-    model_val_ratio: float = 0.2
-    """ratio of validation data for model training"""
-    model_val_patience: int = 50
-    """patience epochs for early stopping"""
-    model_val_delta: float = 0.0
-    """minimum improvement delta for early stopping"""
-    model_max_epochs: int = 100
-    """maximum training epochs for models"""
+    dynamic_train_threshold: float = 0.1
+    """validation loss threshold to consider dynamic model accurate enough"""
+    reward_train_threshold: float = 0.1
+    """validation loss threshold to consider reward model accurate enough"""
+    
+    dynamic_val_ratio: float = 0.2
+    """ratio of validation data for dynamic model training"""
+    reward_val_ratio: float = 0.2
+    """ratio of validation data for reward model training"""
+    
+    dynamic_val_patience: int = 50
+    """patience epochs for dynamic model early stopping"""
+    reward_val_patience: int = 50
+    """patience epochs for reward model early stopping"""
+    
+    dynamic_val_delta: float = 0.0
+    """minimum improvement delta for dynamic model early stopping"""
+    reward_val_delta: float = 0.0
+    """minimum improvement delta for reward model early stopping"""
+    
+    dynamic_max_epochs: int = 100
+    """maximum training epochs for dynamic model"""
+    reward_max_epochs: int = 100
+    """maximum training epochs for reward model"""
+    
     dynamic_train_batch_size: int = 1024
     """batch size for training dynamic model"""
     reward_train_batch_size: int = 1024
@@ -163,7 +178,7 @@ def train_reward_with_validation(model, buffer, args, device, writer, global_ste
     
     # Split train/validation
     indices = torch.randperm(len(obs))
-    split = int(len(obs) * (1 - args.model_val_ratio))
+    split = int(len(obs) * (1 - args.dynamic_val_ratio))
     
     train_obs = obs[indices[:split]]
     train_acts = actions[indices[:split]]
@@ -176,7 +191,7 @@ def train_reward_with_validation(model, buffer, args, device, writer, global_ste
     best_val_loss = float('inf')
     patience_counter = 0
     
-    for epoch in range(args.model_max_epochs):
+    for epoch in range(args.dynamic_max_epochs):
         # Training
         model.train()
         preds = model(train_obs, train_acts)
@@ -206,12 +221,12 @@ def train_reward_with_validation(model, buffer, args, device, writer, global_ste
             writer.add_scalar("metrics/reward_val_r2", val_metrics["r2"], global_step)
 
             # Early stopping check
-            if val_loss < best_val_loss - args.model_val_delta:
+            if val_loss < best_val_loss - args.dynamic_val_delta:
                 best_val_loss = val_loss
                 patience_counter = 0
             else:
                 patience_counter += 1
-                if patience_counter >= args.model_val_patience:
+                if patience_counter >= args.dynamic_val_patience:
                     break
 
     # Final evaluation
@@ -241,7 +256,7 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
     
     # Split train/validation
     indices = torch.randperm(len(obs))
-    split = int(len(obs) * (1 - args.model_val_ratio))
+    split = int(len(obs) * (1 - args.reward_val_ratio))
     
     train_obs = obs[indices[:split]]
     train_acts = actions[indices[:split]]
@@ -254,7 +269,7 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
     best_val_loss = float('inf')
     patience_counter = 0
     
-    for epoch in range(args.model_max_epochs):
+    for epoch in range(args.reward_max_epochs):
         # Training
         model.train()
         pred_trajectories = model(train_obs, train_acts)
@@ -284,12 +299,12 @@ def train_dynamics_with_validation(model, buffer, args, device, writer, global_s
             writer.add_scalar("metrics/dynamic_val_r2", val_metrics["r2"], global_step)
 
             # Early stopping check
-            if val_loss < best_val_loss - args.model_val_delta:
+            if val_loss < best_val_loss - args.reward_val_delta:
                 best_val_loss = val_loss
                 patience_counter = 0
             else:
                 patience_counter += 1
-                if patience_counter >= args.model_val_patience:
+                if patience_counter >= args.reward_val_patience:
                     break
 
     # Final evaluation
@@ -502,10 +517,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("metrics/dynamic_val_mae", dyn_metrics["mae"], global_step)
                 writer.add_scalar("metrics/dynamic_val_r2", dyn_metrics["r2"], global_step)
             
-            if dyn_current_loss > args.model_train_threshold:
+            if dyn_current_loss > args.dynamic_train_threshold:
                 print(f"Training dynamics model (loss: {dyn_current_loss:.4f})")
                 dyn_results = train_dynamics_with_validation(dynamic_model, rb, args, device, writer, global_step)
-                if dyn_results["val"]["mse"] > args.model_train_threshold:
+                if dyn_results["val"]["mse"] > args.dynamic_train_threshold:
                     skip_update = True
 
             # Check and train reward model
@@ -518,10 +533,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("metrics/reward_val_mae", rew_metrics["mae"], global_step)
                 writer.add_scalar("metrics/reward_val_r2", rew_metrics["r2"], global_step)
             
-            if rew_current_loss > args.model_train_threshold:
+            if rew_current_loss > args.reward_train_threshold:
                 print(f"Training reward model (loss: {rew_current_loss:.4f})")
                 rew_results = train_reward_with_validation(reward_model, rb, args, device, writer, global_step)
-                if rew_results["val"]["mse"] > args.model_train_threshold:
+                if rew_results["val"]["mse"] > args.reward_train_threshold:
                     skip_update = True
 
             if skip_update:

@@ -76,8 +76,10 @@ class Args:
     """minimum improvement delta for early stopping"""
     model_max_epochs: int = 100
     """maximum training epochs for models"""
-    model_train_batch_size: int = 1024
-    """batch size for training dynamic and reward models""" #duplicate these arguemtns for dynamic and reward models ai!
+    dynamic_train_batch_size: int = 1024
+    """batch size for training dynamic model"""
+    reward_train_batch_size: int = 1024
+    """batch size for training reward model"""
     grad_norm_clip: Optional[float] = 0.5
     """gradient norm clipping threshold (None for no clipping)"""
 
@@ -154,7 +156,7 @@ class DynamicModel(nn.Module):
 def train_reward_with_validation(model, buffer, args, device, writer, global_step):
     """Train reward model with early stopping using replay buffer data"""
     # Sample and split data
-    data = buffer.sample(args.model_train_batch_size)
+    data = buffer.sample(args.dynamic_train_batch_size)
     obs = data.observations
     actions = data.actions
     rewards = data.rewards
@@ -225,7 +227,7 @@ def train_reward_with_validation(model, buffer, args, device, writer, global_ste
 
 def train_dynamics_with_validation(model, buffer, args, device, writer, global_step):
     # Sample initial data
-    data = buffer.sample(args.model_train_batch_size)
+    data = buffer.sample(args.reward_train_batch_size)
     
     # Filter out terminal transitions
     non_terminal_mask = data.dones.squeeze(-1) == 0

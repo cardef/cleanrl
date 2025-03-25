@@ -61,7 +61,7 @@ class Args:
     """the scale of exploration noise"""
     learning_starts: int = 25e3
     """timestep to start learning"""
-    policy_frequency: int = 1
+    policy_frequency: int = 20
     """the frequency of training policy (delayed)"""
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
@@ -78,7 +78,7 @@ class Args:
     """maximum training epochs for models"""
     model_train_batch_size: int = 1024
     """batch size for training dynamic and reward models"""
-    grad_norm_clip: Optional[float] = None
+    grad_norm_clip: Optional[float] = 0.5
     """gradient norm clipping threshold (None for no clipping)"""
 
 

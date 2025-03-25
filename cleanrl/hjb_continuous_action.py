@@ -22,6 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
+    ema_decay: float = 0.999  # EMA decay rate (typically 0.999-0.9999)
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -429,6 +430,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     critic_optimizer = optim.AdamW(list(critic.parameters()), lr=args.learning_rate)
     actor_optimizer = optim.AdamW(list(actor.parameters()), lr=args.learning_rate)
     
+    # Initialize EMA models
+    ema_actor = torch.optim.swa_utils.AveragedModel(
+        actor,
+        multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(args.ema_decay)
+    )
+    ema_critic = torch.optim.swa_utils.AveragedModel(
+        critic,
+        multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(args.ema_decay)
+    )
+    
     # Initialize dynamic and reward models
     obs_dim = np.array(envs.single_observation_space.shape).prod()
     action_dim = np.prod(envs.single_action_space.shape)
@@ -560,6 +571,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 if args.grad_norm_clip is not None:
                     nn.utils.clip_grad_norm_(actor.parameters(), args.grad_norm_clip)
                 actor_optimizer.step()
+                # Update EMA after each optimization step
+                ema_actor.update_parameters(actor)
 
             for _ in range(args.policy_frequency):   
                 dVdx = vmap(compute_value_grad, in_dims=(0))(mb_obs)
@@ -589,6 +602,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 if args.grad_norm_clip is not None:
                     nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
                 critic_optimizer.step()
+                # Update EMA after each optimization step
+                ema_critic.update_parameters(critic)
 
             
             
@@ -600,6 +615,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 print("SPS:", int(global_step / (time.time() - start_time)))
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+    # Replace with EMA versions before saving
+    actor.load_state_dict(ema_actor.module.state_dict())
+    critic.load_state_dict(ema_critic.module.state_dict())
+    
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save((actor.state_dict(), critic.state_dict()), model_path)

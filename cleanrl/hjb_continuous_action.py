@@ -101,6 +101,8 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         else:
             env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
+        # Set dtype before normalization
+        env.observation_space.dtype = np.float32
         # Apply observation normalization
         env = gym.wrappers.NormalizeObservation(env)
         env.action_space.seed(seed)
@@ -405,6 +407,8 @@ if __name__ == "__main__":
 
     start_time = time.time()
     obs, _ = envs.reset(seed=args.seed)
+    # Ensure initial obs is float32
+    obs = obs.astype(np.float32)
     dynamic_model_accurate = False
     reward_model_accurate = False
 
@@ -420,15 +424,19 @@ if __name__ == "__main__":
                 # Add batch dimension for the single observation
                 obs_tensor = torch.Tensor(obs).unsqueeze(0).to(device)
                 actions_tensor = ema_actor(obs_tensor)
-                # Add exploration noise scaled by action range
-                noise = torch.normal(0, actor.action_scale * args.exploration_noise, device=device)
+                # Add exploration noise with correct signature for torch.normal
+                # mean=0.0, std=args.exploration_noise, size=actions_tensor.shape
+                noise = torch.normal(0.0, args.exploration_noise, size=actions_tensor.shape, device=device)
                 actions_tensor += noise
                 # Remove batch dimension and clip action
+                # Note: Noise is added in the normalized space [-1, 1], then clipped, then rescaled by the actor.
                 actions = actions_tensor.squeeze(0).cpu().numpy().clip(envs.action_space.low, envs.action_space.high)
 
         # Environment step
         # Unpack correctly for single env: obs, reward, terminated, truncated, info
         next_obs, reward, terminated, truncated, info = envs.step(actions)
+        # Ensure next_obs is float32
+        next_obs = next_obs.astype(np.float32)
         # Convert reward to float32 for consistency
         reward = np.float32(reward)
 
@@ -455,8 +463,9 @@ if __name__ == "__main__":
             # Check if 'final_observation' is available and not None
             final_obs = info.get("final_observation")
             if final_obs is not None:
-                 real_next_obs = final_obs
-            # else: use next_obs as is, though it might be from a truncated episode start
+                 # Ensure final_obs is float32
+                 real_next_obs = final_obs.astype(np.float32)
+            # else: use next_obs (already float32) as is
 
         # Add batch dimension before adding to buffer
         # Wrap single values in arrays/lists as expected by ReplayBuffer

@@ -591,8 +591,8 @@ if __name__ == "__main__":
             # --- Critic Update ---
             # Calculate dV/dx using the EMA critic for stability
             # Need to wrap the EMA model call for grad
-            ema_critic_eval = lambda x: ema_critic(x)
-            compute_value_grad = grad(ema_critic_eval)
+            
+            compute_value_grad = grad(lambda x: critic(x))
             # Use vmap for batch processing
             dVdx = vmap(compute_value_grad)(mb_obs) # Shape: (batch_size, obs_dim)
 
@@ -619,7 +619,7 @@ if __name__ == "__main__":
             # Calculate the HJB residual: H - rho * V(x)
             # Use the *current* critic (not EMA) for the V(x) term, as this is what we are optimizing
             current_v = critic(mb_obs) # Shape: (batch_size,)
-            hjb_residual = hamiltonian - rho * current_v # Shape: (batch_size,)
+            hjb_residual = hamiltonian + rho * current_v # Shape: (batch_size,)
 
             # Critic loss: 0.5 * MSE of the HJB residual
             critic_loss = 0.5 * (hjb_residual ** 2).mean()
@@ -643,7 +643,8 @@ if __name__ == "__main__":
                 # dVdx was calculated using EMA critic, treat it as constant for actor update.
 
                 # Detach dVdx as we don't want gradients flowing back to the critic from the actor loss
-                dVdx_detached = dVdx.detach()
+                compute_value_grad = grad(lambda x: ema_critic(x))
+                dVdx_detached = vmap(compute_value_grad)(mb_obs).detach()
 
                 # Get actions from the *current* actor
                 current_actions_actor = actor(mb_obs)

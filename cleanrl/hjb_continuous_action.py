@@ -754,20 +754,15 @@ if __name__ == "__main__":
     # args = tyro.cli(Args) # Handled earlier
     # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}" # Handled earlier
     # if args.track: # Handled earlier
-        import wandb
+    #     import wandb # Handled earlier
+    #     wandb.init(...) # Handled earlier
+    # writer = SummaryWriter(f"runs/{run_name}") # Handled earlier
+    # writer.add_text(...) # Handled earlier
 
-        wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
-            name=run_name,
-            monitor_gym=True,
-            save_code=True,
-        )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
+    # TRY NOT TO MODIFY: seeding (This block seems duplicated, already handled earlier)
+    # random.seed(args.seed)
+    # np.random.seed(args.seed)
+    # torch.manual_seed(args.seed)
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 

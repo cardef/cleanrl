@@ -427,11 +427,44 @@ if __name__ == "__main__":
                 actions = actions_tensor.squeeze(0).cpu().numpy().clip(envs.action_space.low, envs.action_space.high)
 
         # Environment step
-        # Need to add batch dimension for ReplayBuffer.add
-        next_obs, rewards, terminations, truncations, infos = envs.step(actions)
+        # Unpack correctly for single env: obs, reward, terminated, truncated, info
+        next_obs, reward, terminated, truncated, info = envs.step(actions)
+        # Convert reward to float32 for consistency
+        reward = np.float32(reward)
 
         # Logging
-        if "final_info" in infos:
+        # info dict contains the final_info if episode ended
+        if terminated or truncated:
+            final_info = info.get("final_info")
+            if final_info and "episode" in final_info:
+                print(f"global_step={global_step}, episodic_return={final_info['episode']['r']}")
+                writer.add_scalar("charts/episodic_return", final_info['episode']['r'], global_step)
+                writer.add_scalar("charts/episodic_length", final_info['episode']['l'], global_step)
+                # Log normalized env stats if available (assuming NormalizeObservation wrapper)
+                # Note: Accessing _running_mean/_running_var might be fragile if wrappers change
+                if hasattr(envs, "_running_mean"):
+                    writer.add_scalar("charts/obs_mean", envs._running_mean.mean().item(), global_step)
+                    writer.add_scalar("charts/obs_std", np.sqrt(envs._running_var).mean().item(), global_step)
+
+
+        # Store transition in replay buffer
+        # Use `real_next_obs` for buffer storage if available (handles truncation)
+        real_next_obs = next_obs.copy()
+        # Handle truncation for single environment
+        if truncated:
+            # Check if 'final_observation' is available and not None
+            final_obs = info.get("final_observation")
+            if final_obs is not None:
+                 real_next_obs = final_obs
+            # else: use next_obs as is, though it might be from a truncated episode start
+
+        # Add batch dimension before adding to buffer
+        # Wrap single values in arrays/lists as expected by ReplayBuffer
+        rb.add(np.expand_dims(obs, 0), np.expand_dims(real_next_obs, 0), np.expand_dims(actions, 0), np.array([reward]), np.array([terminated]), [info])
+
+
+        # Update current observation
+        obs = next_obs
             for info in infos["final_info"]:
                 # Skip gymnasium internal final_info keys
                 if "episode" not in info: continue

@@ -63,7 +63,7 @@ class Args:
     """the scale of exploration noise"""
     learning_starts: int = 25e3
     """timestep to start learning"""
-    policy_frequency: int = 2 # Standard DDPG/TD3 delayed policy update frequency
+    policy_frequency: int = 1 # Standard DDPG/TD3 delayed policy update frequency
     """the frequency of training policy (delayed)"""
     ema_decay: float = 0.0 # EMA decay rate for target networks
     """EMA decay rate (typically 0.999-0.9999)"""
@@ -76,7 +76,7 @@ class Args:
     """Number of samples drawn from the buffer for model training/validation"""
     dynamic_train_threshold: float = 0.01
     """validation loss threshold to consider dynamic model accurate enough"""
-    reward_train_threshold: float = 0.001
+    reward_train_threshold: float = 0.01
     """validation loss threshold to consider reward model accurate enough"""
     model_val_ratio: float = 0.2 # Unified validation ratio
     """ratio of validation data for model training"""
@@ -363,10 +363,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     # It's essential to get the dt after all wrappers that might affect it
     try:
         # For MuJoCo environments
-        env_dt = envs.unwrapped.model.opt.timestep * envs.unwrapped.frame_skip
+        env_dt = envs.get_attr("dt")[0]
     except AttributeError:
         # Fallback for other environments, may need adjustment
-        print("Warning: Could not automatically determine environment dt. Using default 1/50.")
+        print("Warning: Could not automatically determine environment dt. Using default 0.05.")
         env_dt = 0.05 # A common default, but verify for your specific env_id!
     # Agent setup
     actor = HJBActor(envs).to(device)
@@ -421,7 +421,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
             with torch.no_grad():
-                actions = actor(torch.Tensor(obs).to(device))
+                actions = ema_actor(torch.Tensor(obs).to(device))
                 actions += torch.normal(0, actor.action_scale * args.exploration_noise)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
@@ -598,7 +598,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             # Calculate the HJB residual: H - rho * V(x)
             # Use the *current* critic (not EMA) for the V(x) term, as this is what we are optimizing
             current_v = critic(mb_obs) # Shape: (batch_size,)
-            hjb_residual = hamiltonian + rho * current_v # Shape: (batch_size,)
+            hjb_residual = hamiltonian - rho * current_v # Shape: (batch_size,)
 
             # Critic loss: 0.5 * MSE of the HJB residual
             critic_loss = 0.5 * (hjb_residual ** 2).mean()

@@ -51,7 +51,7 @@ class Args:
     """the environment id of the Atari game"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-3
     """the learning rate of the optimizer"""
     buffer_size: int = int(1e6) # Reduced buffer size
     """the replay memory buffer size"""
@@ -65,7 +65,7 @@ class Args:
     """timestep to start learning"""
     policy_frequency: int = 2 # Standard DDPG/TD3 delayed policy update frequency
     """the frequency of training policy (delayed)"""
-    ema_decay: float = 0.995 # EMA decay rate for target networks
+    ema_decay: float = 0.0 # EMA decay rate for target networks
     """EMA decay rate (typically 0.999-0.9999)"""
     # Removed noise_clip as it's TD3 specific, not canonical DDPG or this HJB variant
 
@@ -86,9 +86,9 @@ class Args:
     """minimum improvement delta for model early stopping"""
     model_max_epochs: int = 50 # Unified maximum training epochs
     """maximum training epochs for models"""
-    model_train_batch_size: int = 1024 # Mini-batch size for model training epochs
+    model_train_batch_size: int = 256 # Mini-batch size for model training epochs
     """batch size for training models"""
-    grad_norm_clip: Optional[float] = 1.0 # Gradient clipping for actor/critic
+    grad_norm_clip: Optional[float] = 0.5 # Gradient clipping for actor/critic
     """gradient norm clipping threshold (None for no clipping)"""
 
 
@@ -259,7 +259,6 @@ def train_model_epoch(
     total_loss = 0.0
     for batch_idx, batch_data in enumerate(train_loader):
         obs, actions, targets = [d.to(device) for d in batch_data]
-
         if is_dynamic_model:
             preds = model(obs, actions) # Dynamic model predicts next_obs
         else:
@@ -322,6 +321,13 @@ def validate_model(
 # --- Main Execution ---
 
 if __name__ == "__main__":
+    import stable_baselines3 as sb3
+    if sb3.__version__ < "2.0":
+        raise ValueError(
+            """Ongoing migration: run the following command to install the new dependencies:
+poetry run pip install "stable_baselines3==2.0.0a1"
+"""
+        )
     args = tyro.cli(Args)
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
@@ -379,8 +385,8 @@ if __name__ == "__main__":
     )
 
     # Dynamic and Reward Model setup
-    obs_dim = np.array(envs.observation_space.shape).prod()
-    action_dim = np.prod(envs.action_space.shape)
+    obs_dim = np.array(envs.single_observation_space.shape).prod()
+    action_dim = np.prod(envs.single_action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim, env_dt, device).to(device)
     reward_model = RewardModel(obs_dim, action_dim).to(device)
     dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=args.learning_rate)
@@ -389,8 +395,8 @@ if __name__ == "__main__":
     # Replay buffer
     rb = ReplayBuffer(
         args.buffer_size,
-        envs.observation_space,
-        envs.action_space,
+        envs.single_observation_space,
+        envs.single_action_space,
         device,
         handle_timeout_termination=False, # Important for model learning
     )
@@ -461,7 +467,7 @@ if __name__ == "__main__":
                 indices = torch.randperm(len(dyn_obs), device=device)
                 split = int(len(dyn_obs) * (1 - args.model_val_ratio))
                 train_idx, val_idx = indices[:split], indices[split:]
-
+                
                 train_dataset = TensorDataset(dyn_obs[train_idx], dyn_acts[train_idx], dyn_targets[train_idx])
                 val_dataset = TensorDataset(dyn_obs[val_idx], dyn_acts[val_idx], dyn_targets[val_idx])
                 train_loader = DataLoader(train_dataset, batch_size=args.model_train_batch_size, shuffle=True)
@@ -486,8 +492,7 @@ if __name__ == "__main__":
                         if best_val_loss <= args.dynamic_train_threshold:
                             dynamic_model_accurate = True
                             print(f"  Dynamic model reached accuracy threshold ({best_val_loss:.6f} <= {args.dynamic_train_threshold}).")
-                            # Optionally break early if accuracy is met and patience allows
-                            # break
+                            break
                     else:
                         patience_counter += 1
                         if patience_counter >= args.model_val_patience:
@@ -536,7 +541,7 @@ if __name__ == "__main__":
                         reward_model_accurate = True
                         print(f"  Reward model reached accuracy threshold ({best_val_loss:.6f} <= {args.reward_train_threshold}).")
                         # Optionally break early
-                        # break
+                        break
                 else:
                     patience_counter += 1
                     if patience_counter >= args.model_val_patience:
@@ -726,22 +731,3 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
     print("Training finished.")
-
-    # Note: The following lines were part of the original __main__ block but are now handled earlier.
-    # args = tyro.cli(Args) # Handled earlier
-    # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}" # Handled earlier
-    # if args.track: # Handled earlier
-    #     import wandb # Handled earlier
-    #     wandb.init(...) # Handled earlier
-    # writer = SummaryWriter(f"runs/{run_name}") # Handled earlier
-    # writer.add_text(...) # Handled earlier
-
-    # TRY NOT TO MODIFY: seeding (This block seems duplicated, already handled earlier)
-    # random.seed(args.seed)
-    # np.random.seed(args.seed)
-    # torch.manual_seed(args.seed)
-
-    # TRY NOT TO MODIFY: seeding (This block seems duplicated, already handled earlier)
-    # random.seed(args.seed) # Handled earlier
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)

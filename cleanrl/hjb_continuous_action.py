@@ -24,7 +24,6 @@ from torch.utils.tensorboard import SummaryWriter
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
-    ema_decay: float = 0.995  # EMA decay rate (typically 0.999-0.9999)
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -200,7 +199,7 @@ class HJBCritic(nn.Module):
     """Value function V(x)."""
     def __init__(self, env):
         super().__init__()
-        obs_dim = np.array(env.single_observation_space.shape).prod()
+        obs_dim = np.array(env.observation_space.shape).prod()
         self.fc1 = nn.Linear(obs_dim, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
@@ -215,15 +214,8 @@ class HJBActor(nn.Module):
     """Policy function pi(x)."""
     def __init__(self, env):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc_mu = nn.Linear(256, np.prod(env.single_action_space.shape))
-        # action rescaling
-        self.register_buffer(
-            "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
-        )
-        obs_dim = np.array(env.single_observation_space.shape).prod()
-        action_dim = np.prod(env.single_action_space.shape)
+        obs_dim = np.array(env.observation_space.shape).prod()
+        action_dim = np.prod(env.action_space.shape)
         self.fc1 = nn.Linear(obs_dim, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc_mu = nn.Linear(256, action_dim)
@@ -369,9 +361,9 @@ if __name__ == "__main__":
     env_fn = make_env(args.env_id, args.seed, 0, args.capture_video, run_name)
     envs, env_dt = env_fn() # Get env and dt
     print(f"Environment dt: {env_dt}")
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    assert isinstance(envs.action_space, gym.spaces.Box), "only continuous action space is supported"
     # Ensure observation space is float32 for normalization wrapper
-    envs.single_observation_space.dtype = np.float32
+    envs.observation_space.dtype = np.float32
 
     # Agent setup
     actor = HJBActor(envs).to(device)
@@ -390,8 +382,8 @@ if __name__ == "__main__":
     )
 
     # Dynamic and Reward Model setup
-    obs_dim = np.array(envs.single_observation_space.shape).prod()
-    action_dim = np.prod(envs.single_action_space.shape)
+    obs_dim = np.array(envs.observation_space.shape).prod()
+    action_dim = np.prod(envs.action_space.shape)
     dynamic_model = DynamicModel(obs_dim, action_dim, env_dt, device).to(device)
     reward_model = RewardModel(obs_dim, action_dim).to(device)
     dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=args.learning_rate)
@@ -400,8 +392,8 @@ if __name__ == "__main__":
     # Replay buffer
     rb = ReplayBuffer(
         args.buffer_size,
-        envs.single_observation_space,
-        envs.single_action_space,
+        envs.observation_space,
+        envs.action_space,
         device,
         handle_timeout_termination=False, # Important for model learning
     )
@@ -420,10 +412,12 @@ if __name__ == "__main__":
     for global_step in range(args.total_timesteps):
         # Action selection
         if global_step < args.learning_starts:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            # Sample single action for the single environment
+            actions = envs.action_space.sample()
         else:
             with torch.no_grad():
                 # Use EMA actor for exploration
+                # Add batch dimension for the single observation
                 obs_tensor = torch.Tensor(obs).to(device)
                 actions_tensor = ema_actor(obs_tensor)
                 # Add exploration noise scaled by action range

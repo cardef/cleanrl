@@ -134,7 +134,10 @@ class ODEFunc(nn.Module):
 
     def forward(self, t, x, a):
         # t is unused in this autonomous system, but required by torchode
-        return self.net(torch.cat([x, a], dim=-1))
+        # Ensure inputs to the network are float32, as torchode might use float64 internally
+        x_float = x.float()
+        a_float = a.float()
+        return self.net(torch.cat([x_float, a_float], dim=-1))
 
 class DynamicModel(nn.Module):
     """Predicts the next state using a neural ODE."""

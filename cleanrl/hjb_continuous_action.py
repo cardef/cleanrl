@@ -749,14 +749,11 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
     print("Training finished.")
-        raise ValueError(
-            """Ongoing migration: run the following command to install the new dependencies:
-poetry run pip install "stable_baselines3==2.0.0a1"
-"""
-        )
-    args = tyro.cli(Args)
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    if args.track:
+
+    # Note: The following lines were part of the original __main__ block but are now handled earlier.
+    # args = tyro.cli(Args) # Handled earlier
+    # run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}" # Handled earlier
+    # if args.track: # Handled earlier
         import wandb
 
         wandb.init(

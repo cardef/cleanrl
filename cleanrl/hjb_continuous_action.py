@@ -641,7 +641,7 @@ if __name__ == "__main__":
             critic_optimizer.step()
 
             # Update EMA Critic
-            ema_critic.update([critic]) # Pass as list
+            ema_critic.update_parameters(critic)
 
 
             # --- Actor Update (Delayed) ---
@@ -684,7 +684,7 @@ if __name__ == "__main__":
                 actor_optimizer.step()
 
                 # Update EMA Actor
-                ema_actor.update([actor]) # Pass as list
+                ema_actor.update_parameters(actor)
 
                 # Logging Actor/Critic Updates
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)

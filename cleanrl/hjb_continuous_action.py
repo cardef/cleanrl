@@ -102,16 +102,9 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.action_space.seed(seed)
-        # It's essential to get the dt after all wrappers that might affect it
-        try:
-            # For MuJoCo environments
-            dt = env.unwrapped.model.opt.timestep * env.unwrapped.frame_skip
-        except AttributeError:
-            # Fallback for other environments, may need adjustment
-            print("Warning: Could not automatically determine environment dt. Using default 1/50.")
-            dt = 0.02 # A common default, but verify for your specific env_id!
+        
 
-        return env, dt
+        return env
 
     return thunk
 
@@ -359,13 +352,16 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # Environment setup
-    env_fn = make_env(args.env_id, args.seed, 0, args.capture_video, run_name)
-    envs, env_dt = env_fn() # Get env and dt
-    print(f"Environment dt: {env_dt}")
-    assert isinstance(envs.action_space, gym.spaces.Box), "only continuous action space is supported"
-    # Ensure observation space is float32 for normalization wrapper
-    envs.observation_space.dtype = np.float32
-
+    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    # It's essential to get the dt after all wrappers that might affect it
+    try:
+        # For MuJoCo environments
+        env_dt = envs.unwrapped.model.opt.timestep * envs.unwrapped.frame_skip
+    except AttributeError:
+        # Fallback for other environments, may need adjustment
+        print("Warning: Could not automatically determine environment dt. Using default 1/50.")
+        env_dt = 0.05 # A common default, but verify for your specific env_id!
     # Agent setup
     actor = HJBActor(envs).to(device)
     critic = HJBCritic(envs).to(device)
@@ -389,7 +385,7 @@ if __name__ == "__main__":
     reward_model = RewardModel(obs_dim, action_dim).to(device)
     dynamic_optimizer = optim.AdamW(dynamic_model.parameters(), lr=args.learning_rate)
     reward_optimizer = optim.AdamW(reward_model.parameters(), lr=args.learning_rate)
-
+    envs.single_observation_space.dtype = np.float32
     # Replay buffer
     rb = ReplayBuffer(
         args.buffer_size,
@@ -411,62 +407,37 @@ if __name__ == "__main__":
     dynamic_model_accurate = False
     reward_model_accurate = False
 
-    # --- Training Loop ---
+    # TRY NOT TO MODIFY: start the game
+    obs, _ = envs.reset(seed=args.seed)
     for global_step in range(args.total_timesteps):
-        # Action selection
+        # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
-            # Sample single action for the single environment
-            actions = envs.action_space.sample()
+            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
             with torch.no_grad():
-                # Use EMA actor for exploration
-                # Add batch dimension for the single observation
-                obs_tensor = torch.Tensor(obs).unsqueeze(0).to(device)
-                actions_tensor = ema_actor(obs_tensor)
-                # Add exploration noise with correct signature for torch.normal
-                # mean=0.0, std=args.exploration_noise, size=actions_tensor.shape
-                noise = torch.normal(0.0, args.exploration_noise, size=actions_tensor.shape, device=device)
-                actions_tensor += noise
-                # Remove batch dimension and clip action
-                # Note: Noise is added in the normalized space [-1, 1], then clipped, then rescaled by the actor.
-                actions = actions_tensor.squeeze(0).cpu().numpy().clip(envs.action_space.low, envs.action_space.high)
+                actions = actor(torch.Tensor(obs).to(device))
+                actions += torch.normal(0, actor.action_scale * args.exploration_noise)
+                actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
 
-        # Environment step
-        # Unpack correctly for single env: obs, reward, terminated, truncated, info
-        next_obs, reward, terminated, truncated, info = envs.step(actions)
-        # Ensure next_obs is float32
-        next_obs = next_obs.astype(np.float32)
-        # Convert reward to float32 for consistency
-        reward = np.float32(reward)
+        # TRY NOT TO MODIFY: execute the game and log data.
+        next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
-        # Logging
-        # info dict contains the final_info if episode ended
-        if terminated or truncated:
-            final_info = info.get("final_info")
-            if final_info and "episode" in final_info:
-                print(f"global_step={global_step}, episodic_return={final_info['episode']['r']}")
-                writer.add_scalar("charts/episodic_return", final_info['episode']['r'], global_step)
-                writer.add_scalar("charts/episodic_length", final_info['episode']['l'], global_step)
+        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        if "final_info" in infos:
+            for info in infos["final_info"]:
+                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+                writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+                break
 
-
-        # Store transition in replay buffer
-        # Use `real_next_obs` for buffer storage if available (handles truncation)
+        # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
-        # Handle truncation for single environment
-        if truncated:
-            # Check if 'final_observation' is available and not None
-            final_obs = info.get("final_observation")
-            if final_obs is not None:
-                 # Ensure final_obs is float32
-                 real_next_obs = final_obs.astype(np.float32)
-            # else: use next_obs (already float32) as is
+        for idx, trunc in enumerate(truncations):
+            if trunc:
+                real_next_obs[idx] = infos["final_observation"][idx]
+        rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
 
-        # Add batch dimension before adding to buffer
-        # Wrap single values in arrays/lists as expected by ReplayBuffer
-        rb.add(np.expand_dims(obs, 0), np.expand_dims(real_next_obs, 0), np.expand_dims(actions, 0), np.array([reward]), np.array([terminated]), [info])
-
-
-        # Update current observation
+        # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
 
         # --- Model Training (Periodic) ---

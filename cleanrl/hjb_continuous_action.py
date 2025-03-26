@@ -763,10 +763,8 @@ if __name__ == "__main__":
     # random.seed(args.seed)
     # np.random.seed(args.seed)
     # torch.manual_seed(args.seed)
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
 
-    # TRY NOT TO MODIFY: seeding
-    random.seed(args.seed)
+    # TRY NOT TO MODIFY: seeding (This block seems duplicated, already handled earlier)
+    # random.seed(args.seed) # Handled earlier
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)

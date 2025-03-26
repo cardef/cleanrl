@@ -418,14 +418,16 @@ if __name__ == "__main__":
             with torch.no_grad():
                 # Use EMA actor for exploration
                 # Add batch dimension for the single observation
-                obs_tensor = torch.Tensor(obs).to(device)
+                obs_tensor = torch.Tensor(obs).unsqueeze(0).to(device)
                 actions_tensor = ema_actor(obs_tensor)
                 # Add exploration noise scaled by action range
                 noise = torch.normal(0, actor.action_scale * args.exploration_noise, device=device)
                 actions_tensor += noise
-                actions = actions_tensor.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
+                # Remove batch dimension and clip action
+                actions = actions_tensor.squeeze(0).cpu().numpy().clip(envs.action_space.low, envs.action_space.high)
 
         # Environment step
+        # Need to add batch dimension for ReplayBuffer.add
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
         # Logging
@@ -452,7 +454,9 @@ if __name__ == "__main__":
                      real_next_obs[idx] = infos["final_observation"][idx]
                 # else: use next_obs as is, though it might be from a truncated episode start
 
-        rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
+        # Add batch dimension before adding to buffer
+        rb.add(np.expand_dims(obs, 0), np.expand_dims(real_next_obs, 0), np.expand_dims(actions, 0), np.array([rewards]), np.array([terminations]), [infos])
+
 
         # Update current observation
         obs = next_obs

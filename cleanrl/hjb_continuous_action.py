@@ -101,10 +101,6 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         else:
             env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        # Set dtype before normalization
-        env.observation_space.dtype = np.float32
-        # Apply observation normalization
-        env = gym.wrappers.NormalizeObservation(env)
         env.action_space.seed(seed)
         # It's essential to get the dt after all wrappers that might affect it
         try:
@@ -448,11 +444,6 @@ if __name__ == "__main__":
                 print(f"global_step={global_step}, episodic_return={final_info['episode']['r']}")
                 writer.add_scalar("charts/episodic_return", final_info['episode']['r'], global_step)
                 writer.add_scalar("charts/episodic_length", final_info['episode']['l'], global_step)
-                # Log normalized env stats if available (assuming NormalizeObservation wrapper)
-                # Note: Accessing _running_mean/_running_var might be fragile if wrappers change
-                if hasattr(envs, "_running_mean"):
-                    writer.add_scalar("charts/obs_mean", envs._running_mean.mean().item(), global_step)
-                    writer.add_scalar("charts/obs_std", np.sqrt(envs._running_var).mean().item(), global_step)
 
 
         # Store transition in replay buffer
@@ -744,8 +735,7 @@ if __name__ == "__main__":
             Model=(HJBActor, HJBCritic), # Pass correct model classes
             device="cpu", # Evaluate on CPU
             exploration_noise=0, # No exploration noise during evaluation
-            norm_obs=args.capture_video # Hack: Use capture_video flag to signal if obs were normalized during training
-                                        # The evaluate script needs modification to handle this
+            norm_obs=False # No observation normalization
         )
         for idx, episodic_return in enumerate(episodic_returns):
             writer.add_scalar("eval/episodic_return", episodic_return, idx)

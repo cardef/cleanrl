@@ -465,34 +465,6 @@ if __name__ == "__main__":
 
         # Update current observation
         obs = next_obs
-            for info in infos["final_info"]:
-                # Skip gymnasium internal final_info keys
-                if "episode" not in info: continue
-                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
-                # Log normalized env stats if available
-                if "running_mean" in info:
-                    writer.add_scalar("charts/obs_mean", info["running_mean"].mean().item(), global_step)
-                    writer.add_scalar("charts/obs_std", np.sqrt(info["running_var"]).mean().item(), global_step)
-
-
-        # Store transition in replay buffer
-        # Use `real_next_obs` for buffer storage if available (handles truncation)
-        real_next_obs = next_obs.copy()
-        for idx, trunc in enumerate(truncations):
-            if trunc:
-                # Check if 'final_observation' is available and not None
-                if "final_observation" in infos and infos["final_observation"] is not None and infos["final_observation"][idx] is not None:
-                     real_next_obs[idx] = infos["final_observation"][idx]
-                # else: use next_obs as is, though it might be from a truncated episode start
-
-        # Add batch dimension before adding to buffer
-        rb.add(np.expand_dims(obs, 0), np.expand_dims(real_next_obs, 0), np.expand_dims(actions, 0), np.array([rewards]), np.array([terminations]), [infos])
-
-
-        # Update current observation
-        obs = next_obs
 
         # --- Model Training (Periodic) ---
         if global_step > args.learning_starts and global_step % args.model_train_freq == 0:

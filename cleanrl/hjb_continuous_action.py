@@ -1,4 +1,41 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ddpg/#ddpg_continuous_actionpy
+
+"""
+Experiment Script: Model-Based Actor-Critic with Continuous-Time HJB Objective
+
+This script implements a Reinforcement Learning agent for continuous control tasks
+based on an Actor-Critic framework. It deviates significantly from standard DDPG/TD3
+by incorporating:
+
+1.  **Learned World Models:**
+    * A `DynamicModel` using a Neural Ordinary Differential Equation (Neural ODE)
+        via the `torchode` library to learn the continuous-time system dynamics:
+        dx/dt = f(x, a; theta_f).
+    * A `RewardModel` using a standard MLP to learn the reward function:
+        r = r(x, a; theta_r).
+2.  **Hamilton-Jacobi-Bellman (HJB) Inspired Critic Loss:**
+    * The critic (Value function V(x)) is trained to satisfy the HJB equation
+        in continuous time: rho * V(x) = max_a [ r(x, a) + dV/dx * f(x, a) ].
+    * The loss minimizes the residual of this equation, potentially including
+        a viscosity term (Laplacian of V) for regularization.
+    * Terminal states are handled separately, enforcing V(x_terminal) = 0.
+3.  **Model-Based Actor Update:**
+    * The actor (Policy pi(x)) is trained to maximize the Hamiltonian:
+        H(x, pi(x), dV/dx) = r(x, pi(x)) + dV/dx * f(x, pi(x)).
+4.  **Model Accuracy Gating:**
+    * Agent training steps (actor and critic updates) are only performed when
+        the learned dynamic and reward models demonstrate sufficient accuracy on
+        a validation set, measured by MSE against thresholds.
+5.  **EMA Target Networks:**
+    * Exponential Moving Average (EMA) models (`torch.optim.swa_utils.AveragedModel`)
+        are used to provide stable targets for both actor and critic updates.
+6.  **Noise Annealing:**
+    * Exploration noise added to the actor's output is linearly annealed over
+        a portion of the training steps.
+
+This approach aims to potentially improve sample efficiency and stability by
+leveraging learned models of the environment within a continuous-time control framework.
+"""
 import os
 import random
 import time
@@ -48,8 +85,8 @@ class Args:
 
     # Algorithm specific arguments
     viscosity_coeff: float = 0.0
-    """coefficient for viscosity regularization term in critic loss"""
-    env_id: str = "InvertedPensulum-v4"
+    """Coefficient for the viscosity regularization term (Laplacian of V) in the critic loss."""
+    env_id: str = "InvertedPendulum-v4"
     """the environment id of the Atari game"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
@@ -65,43 +102,42 @@ class Args:
     """the scale of exploration noise"""
     learning_starts: int = 25e3
     """timestep to start learning"""
-    policy_frequency: int = 2 # Standard DDPG/TD3 delayed policy update frequency
-    """the frequency of training policy (delayed)"""
-    ema_decay: float = 0.995 # EMA decay rate for target networks
-    """EMA decay rate (typically 0.999-0.9999)"""
-    # Removed noise_clip as it's TD3 specific, not canonical DDPG or this HJB variant
+    policy_frequency: int = 20 # Standard DDPG/TD3 delayed policy update frequency
+    """Frequency (in agent updates) to update the policy (actor) network. Critic updated more often."""
+    ema_decay: float = 0.0 # EMA decay rate for target networks
+    """Exponential Moving Average (EMA) decay rate for target networks"""
 
     # Exploration noise annealing parameters
-    exploration_noise_start: float = 0.5
-    """initial exploration noise scale"""
+    exploration_noise_start: float = 0.1
+    """Initial scale of the Gaussian exploration noise (relative to action range)."""
     exploration_noise_end: float = 0.1
-    """final exploration noise scale"""
+    """Final scale of the Gaussian exploration noise after annealing."""
     exploration_noise_anneal_fraction: float = 0.8
-    """fraction of total timesteps over which to anneal noise"""
+    """Fraction of `total_timesteps` over which to linearly anneal the exploration noise scale."""
 
     # Model Training specific arguments
-    model_train_freq: int = 1000 # Frequency to check and potentially retrain models
-    """Frequency (in global steps) to check model accuracy and retrain if needed"""
-    model_dataset_size: int = 50000 # Size of dataset sampled for model training/validation
-    """Number of samples drawn from the buffer for model training/validation"""
+    model_train_freq: int = 1000
+    """Frequency (in environment steps) to check model accuracy and potentially retrain dynamics and reward models."""
+    model_dataset_size: int = 50_000
+    """Number of samples drawn from the replay buffer for training/validating models."""
     dynamic_train_threshold: float = 0.001
-    """validation loss threshold to consider dynamic model accurate enough"""
+    """MSE validation loss threshold below which the dynamic model is considered 'accurate'."""
     reward_train_threshold: float = 0.001
-    """validation loss threshold to consider reward model accurate enough"""
-    model_val_ratio: float = 0.2 # Unified validation ratio
-    """ratio of validation data for model training"""
-    model_val_patience: int = 10 # Unified patience epochs
-    """patience epochs for model early stopping"""
-    model_val_delta: float = 1e-4 # Unified minimum improvement delta
-    """minimum improvement delta for model early stopping"""
-    model_max_epochs: int = 50 # Unified maximum training epochs
-    """maximum training epochs for models"""
-    model_train_batch_size: int = 256 # Mini-batch size for model training epochs
-    """batch size for training models"""
+    """MSE validation loss threshold below which the reward model is considered 'accurate'."""
+    model_val_ratio: float = 0.2
+    """Fraction of the `model_dataset_size` used for validation during model training."""
+    model_val_patience: int = 10
+    """Number of epochs without improvement on validation loss before early stopping model training."""
+    model_val_delta: float = 1e-4
+    """Minimum improvement in validation loss required to reset the early stopping patience counter."""
+    model_max_epochs: int = 50
+    """Maximum number of epochs to train each model per training cycle."""
+    model_train_batch_size: int = 256
+    """Minibatch size used during the epochs of model training."""
     grad_norm_clip: Optional[float] = 0.5 # Gradient clipping for actor/critic
     """gradient norm clipping threshold (None for no clipping)"""
     terminal_coeff: float = 1e0
-    """weighting coefficient for terminal state value loss component"""
+    """Weighting coefficient for the loss ensuring V(terminal state) = 0."""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -124,7 +160,14 @@ def make_env(env_id, seed, idx, capture_video, run_name):
 # --- Model Definitions ---
 
 class ODEFunc(nn.Module):
-    """The function f(t, x, a) defining the ODE dx/dt = f(t, x, a)."""
+    """
+    Defines the function f(t, x, a) for the Neural ODE: dx/dt = f(t, x, a).
+    This network predicts the instantaneous rate of change of the state.
+
+    Args:
+        obs_dim: Dimensionality of the observation space.
+        action_dim: Dimensionality of the action space.
+    """
     def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
@@ -136,14 +179,31 @@ class ODEFunc(nn.Module):
         )
 
     def forward(self, t, x, a):
-        # t is unused in this autonomous system, but required by torchode
-        # Ensure inputs to the network are float32, as torchode might use float64 internally
+        """
+        Computes the state derivative dx/dt.
+
+        Args:
+            t: Current time (scalar or batched). Unused in autonomous systems.
+            x: Current state(s) (batch_size, obs_dim).
+            a: Current action(s) (batch_size, action_dim).
+
+        Returns:
+            The predicted state derivative(s) (batch_size, obs_dim).
+        """
         x_float = x.float()
         a_float = a.float()
         return self.net(torch.cat([x_float, a_float], dim=-1))
 
 class DynamicModel(nn.Module):
-    """Predicts the next state using a neural ODE."""
+    """
+    Predicts the next state by integrating the learned ODE dynamics over one time step dt.
+
+    Args:
+        obs_dim: Dimensionality of the observation space.
+        action_dim: Dimensionality of the action space.
+        dt: The time step duration of the environment.
+        device: The torch device (e.g., 'cpu', 'cuda').
+    """
     def __init__(self, obs_dim, action_dim, dt: float, device: torch.device):
         super().__init__()
         self.ode_func = ODEFunc(obs_dim, action_dim)
@@ -163,6 +223,17 @@ class DynamicModel(nn.Module):
         )
 
     def forward(self, initial_obs, actions):
+        """
+        Predicts the state after one time step dt using the Neural ODE.
+
+        Args:
+            initial_obs: The starting observation(s) (batch_size, obs_dim).
+            actions: The action(s) applied during the time step (batch_size, action_dim).
+                       Assumed constant over the interval [0, dt].
+
+        Returns:
+            The predicted next observation(s) (batch_size, obs_dim).
+        """
         batch_size = initial_obs.shape[0]
         # Use the environment's dt for the step size controller
         dt0 = torch.full((batch_size,), self.dt, device=self.device)
@@ -198,7 +269,14 @@ class RewardModel(nn.Module):
 # --- Agent Network Definitions ---
 
 class HJBCritic(nn.Module):
-    """Value function V(x) with double Q-networks."""
+    """
+    The Value Function V(x) approximator (Critic).
+    Uses a clipped double-Q approach by maintaining two separate critic networks
+    to mitigate overestimation bias, although here they approximate V(x) directly.
+
+    Args:
+        env: The Gymnasium environment instance (used to get observation dim).
+    """
     def __init__(self, env):
         super().__init__()
         obs_dim = np.array(env.observation_space.shape).prod()
@@ -224,7 +302,13 @@ class HJBCritic(nn.Module):
         return self.critic2(x).squeeze()
 
 class HJBActor(nn.Module):
-    """Policy function pi(x)."""
+    """
+    The Policy Function pi(x) approximator (Actor).
+    Outputs a deterministic action for a given state.
+
+    Args:
+        env: The Gymnasium environment instance (used to get observation/action dims and bounds).
+    """
     def __init__(self, env):
         super().__init__()
         obs_dim = np.array(env.observation_space.shape).prod()
@@ -273,7 +357,24 @@ def train_model_epoch(
     model_name: str,
     is_dynamic_model: bool,
 ) -> float:
-    """Trains the model for one epoch."""
+    """
+    Trains a model (Dynamic or Reward) for one epoch using MSE loss.
+
+    Args:
+        model: The model (DynamicModel or RewardModel) to train.
+        optimizer: The optimizer for the model.
+        train_loader: DataLoader providing training batches (obs, actions, targets).
+        device: The torch device.
+        writer: TensorBoard SummaryWriter for logging.
+        epoch: The current training epoch number.
+        global_step: The current total environment steps (for logging).
+        model_name: String identifier for logging ('dynamic' or 'reward').
+        is_dynamic_model: Boolean indicating if it's the DynamicModel (affects forward pass signature).
+        grad_norm_clip_model: Optional max gradient norm for model training.
+
+    Returns:
+        The average training loss for the epoch.
+    """
     model.train()
     total_loss = 0.0
     for batch_idx, batch_data in enumerate(train_loader):
@@ -307,7 +408,23 @@ def validate_model(
     model_name: str,
     is_dynamic_model: bool,
 ) -> Tuple[float, Dict[str, float]]:
-    """Validates the model."""
+    """
+    Validates a model (Dynamic or Reward) on the validation dataset.
+
+    Args:
+        model: The model (DynamicModel or RewardModel) to validate.
+        val_loader: DataLoader providing validation batches (obs, actions, targets).
+        device: The torch device.
+        writer: TensorBoard SummaryWriter for logging.
+        global_step: The current total environment steps (for logging).
+        model_name: String identifier for logging ('dynamic' or 'reward').
+        is_dynamic_model: Boolean indicating if it's the DynamicModel.
+
+    Returns:
+        A tuple containing:
+        - val_loss (float): The average validation MSE loss.
+        - val_metrics (Dict[str, float]): Dictionary of validation metrics (MSE, MAE, R2).
+    """
     model.eval()
     all_preds = []
     all_targets = []

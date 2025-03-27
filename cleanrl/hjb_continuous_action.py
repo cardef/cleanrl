@@ -222,8 +222,8 @@ class HJBCritic(nn.Module):
     def forward(self, x, critic_net=1):
         """Forward pass through specified critic network (1 or 2)."""
         if critic_net == 1:
-            return self.critic1(x).squeeze(-1)
-        return self.critic2(x).squeeze(-1)
+            return self.critic1(x).squeeze()
+        return self.critic2(x).squeeze()
 
 class HJBActor(nn.Module):
     """Policy function pi(x)."""
@@ -663,7 +663,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                 # Use critic1's gradients for actor update
                 with torch.no_grad():
-                    compute_value_grad1 = grad(lambda x: ema_critic1(x))
+                    compute_value_grad1 = grad(lambda x: ema_critic1(x).squeeze())
                     dVdx1 = vmap(compute_value_grad1)(mb_obs)
 
                 current_actions_actor = actor(mb_obs)

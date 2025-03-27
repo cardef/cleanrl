@@ -47,7 +47,7 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    viscosity_coeff: float = 0.01
+    viscosity_coeff: float = 0.001
     """coefficient for viscosity regularization term in critic loss"""
     env_id: str = "Hopper-v4"
     """the environment id of the Atari game"""
@@ -72,7 +72,7 @@ class Args:
     # Removed noise_clip as it's TD3 specific, not canonical DDPG or this HJB variant
 
     # Exploration noise annealing parameters
-    exploration_noise_start: float = 0.5
+    exploration_noise_start: float = 0.2
     """initial exploration noise scale"""
     exploration_noise_end: float = 0.1
     """final exploration noise scale"""
@@ -596,9 +596,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             dVdx = vmap(compute_value_grad)(mb_obs)  # Shape: (batch_size, obs_dim)
 
             # Compute exact Laplacian (trace of Hessian) for viscosity term
-            hessians = vmap(hessian(critic, argnums=0, create_graph=True))(mb_obs)
+            hessians = vmap(hessian(critic, argnums=0))(mb_obs)
             laplacians = torch.einsum('bii->b', hessians)  # Trace of Hessian for each sample
-            viscosity_term = torch.mean(laplacians**2)
 
             # Get actions from the current (non-EMA) actor for the actor loss calculation later
             # but use EMA actor actions for HJB residual calculation for consistency with dVdx source
@@ -620,7 +619,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
             # Calculate the HJB residual: H - rho * V(x)
             current_v = critic(mb_obs)  # Shape: (batch_size,)
-            hjb_residual = hamiltonian - rho * current_v  # Shape: (batch_size,)
+            hjb_residual = hamiltonian - rho * current_v - args.viscosity_coeff * laplacians  # Shape: (batch_size,)
 
             # Create mask for terminal states
             dones = data.dones.squeeze(-1).bool()  # Convert to boolean mask
@@ -636,8 +635,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             terminal_loss = 0.5 * (current_v[terminal_mask] ** 2).mean()
 
             # Combine losses with viscosity regularization
-            critic_loss = hjb_loss + terminal_loss + args.viscosity_coeff * viscosity_term
-            writer.add_scalar("losses/viscosity_term", viscosity_term.item(), global_step)
+            critic_loss = hjb_loss + terminal_loss
 
             # Optimize the critic
             critic_optimizer.zero_grad()

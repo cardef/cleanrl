@@ -9,7 +9,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 from torch import vmap
-from torch.func import grad
+from torch.func import grad, hessian
 import torchode as to
 import torch.nn as nn
 import torch.nn.functional as F
@@ -595,17 +595,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             # Use vmap for batch processing
             dVdx = vmap(compute_value_grad)(mb_obs)  # Shape: (batch_size, obs_dim)
 
-            # Stochastic Laplacian approximation for viscosity term
-            def stochastic_laplacian(x):
-                # Random projection vectors
-                v = torch.randn_like(x)
-                v = v / torch.norm(v, dim=-1, keepdim=True)
-                # Hessian-vector product approximation
-                grad_v = grad(lambda x: critic(x).sum())(x)
-                hv = grad(lambda x: (grad_v * v).sum())(x)
-                return (hv * v).sum(dim=-1)  # Approximation of v^T H v ≈ ΔV
-
-            laplacians = vmap(stochastic_laplacian)(mb_obs)
+            # Compute exact Laplacian (trace of Hessian) for viscosity term
+            hessians = vmap(hessian(critic, argnums=0, create_graph=True))(mb_obs)
+            laplacians = torch.einsum('bii->b', hessians)  # Trace of Hessian for each sample
             viscosity_term = torch.mean(laplacians**2)
 
             # Get actions from the current (non-EMA) actor for the actor loss calculation later

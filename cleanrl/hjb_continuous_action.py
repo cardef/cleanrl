@@ -47,6 +47,8 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
+    viscosity_coeff: float = 0.01
+    """coefficient for viscosity regularization term in critic loss"""
     env_id: str = "Hopper-v4"
     """the environment id of the Atari game"""
     total_timesteps: int = 1000000
@@ -593,6 +595,19 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             # Use vmap for batch processing
             dVdx = vmap(compute_value_grad)(mb_obs)  # Shape: (batch_size, obs_dim)
 
+            # Stochastic Laplacian approximation for viscosity term
+            def stochastic_laplacian(x):
+                # Random projection vectors
+                v = torch.randn_like(x)
+                v = v / torch.norm(v, dim=-1, keepdim=True)
+                # Hessian-vector product approximation
+                grad_v = grad(lambda x: critic(x).sum())(x)
+                hv = grad(lambda x: (grad_v * v).sum())(x)
+                return (hv * v).sum(dim=-1)  # Approximation of v^T H v ≈ ΔV
+
+            laplacians = vmap(stochastic_laplacian)(mb_obs)
+            viscosity_term = torch.mean(laplacians**2)
+
             # Get actions from the current (non-EMA) actor for the actor loss calculation later
             # but use EMA actor actions for HJB residual calculation for consistency with dVdx source
             with torch.no_grad():
@@ -628,8 +643,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             # Terminal state loss (force V(s_terminal) = 0)
             terminal_loss = 0.5 * (current_v[terminal_mask] ** 2).mean()
 
-            # Combine losses with equal weighting
-            critic_loss = hjb_loss + terminal_loss
+            # Combine losses with viscosity regularization
+            critic_loss = hjb_loss + terminal_loss + args.viscosity_coeff * viscosity_term
+            writer.add_scalar("losses/viscosity_term", viscosity_term.item(), global_step)
 
             # Optimize the critic
             critic_optimizer.zero_grad()

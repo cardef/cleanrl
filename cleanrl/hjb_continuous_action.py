@@ -647,8 +647,17 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # Recalculate Hamiltonian using current actor's actions
                 hamiltonian_actor = r_actor + torch.einsum("bi,bi->b", dVdx_detached, f_actor)
 
+                # Create mask for transitions where next state is NON-terminal (same as critic)
+                non_terminal_mask = ~data.terminations.squeeze(-1).bool()
+                hamiltonian_non_term = hamiltonian_actor[non_terminal_mask]
+
+                # Skip update if no non-terminal transitions in batch
+                if hamiltonian_non_term.numel() == 0:
+                    print(f"Skipping actor update at step {global_step} - no non-terminal transitions")
+                    continue
+
                 # Actor loss is the negative mean Hamiltonian (maximization)
-                actor_loss = (-hamiltonian_actor).mean()
+                actor_loss = (-hamiltonian_non_term).mean()
 
                 # Optimize the actor
                 actor_optimizer.zero_grad()

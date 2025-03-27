@@ -47,13 +47,13 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    viscosity_coeff: float = 0.001
+    viscosity_coeff: float = 0.0
     """coefficient for viscosity regularization term in critic loss"""
-    env_id: str = "Hopper-v4"
+    env_id: str = "InvertedPensulum-v4"
     """the environment id of the Atari game"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    learning_rate: float = 1e-3
+    learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
     buffer_size: int = int(1e6) # Reduced buffer size
     """the replay memory buffer size"""
@@ -67,12 +67,12 @@ class Args:
     """timestep to start learning"""
     policy_frequency: int = 2 # Standard DDPG/TD3 delayed policy update frequency
     """the frequency of training policy (delayed)"""
-    ema_decay: float = 0.5 # EMA decay rate for target networks
+    ema_decay: float = 0.995 # EMA decay rate for target networks
     """EMA decay rate (typically 0.999-0.9999)"""
     # Removed noise_clip as it's TD3 specific, not canonical DDPG or this HJB variant
 
     # Exploration noise annealing parameters
-    exploration_noise_start: float = 0.1
+    exploration_noise_start: float = 0.5
     """initial exploration noise scale"""
     exploration_noise_end: float = 0.1
     """final exploration noise scale"""
@@ -132,8 +132,6 @@ class ODEFunc(nn.Module):
             nn.SiLU(), # Changed activation
             nn.Linear(256, 256),
             nn.SiLU(),
-            nn.Linear(256, 256),
-            nn.SiLU(),
             nn.Linear(256, obs_dim),
         )
 
@@ -187,8 +185,6 @@ class RewardModel(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(obs_dim + action_dim, 256),
-            nn.SiLU(),
-            nn.Linear(256, 256),
             nn.SiLU(),
             nn.Linear(256, 256),
             nn.SiLU(),

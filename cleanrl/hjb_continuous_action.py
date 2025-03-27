@@ -63,7 +63,7 @@ class Args:
     """the scale of exploration noise"""
     learning_starts: int = 25e3
     """timestep to start learning"""
-    policy_frequency: int = 1 # Standard DDPG/TD3 delayed policy update frequency
+    policy_frequency: int = 2 # Standard DDPG/TD3 delayed policy update frequency
     """the frequency of training policy (delayed)"""
     ema_decay: float = 0.0 # EMA decay rate for target networks
     """EMA decay rate (typically 0.999-0.9999)"""

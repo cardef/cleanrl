@@ -67,12 +67,12 @@ class Args:
     """timestep to start learning"""
     policy_frequency: int = 2 # Standard DDPG/TD3 delayed policy update frequency
     """the frequency of training policy (delayed)"""
-    ema_decay: float = 0.0 # EMA decay rate for target networks
+    ema_decay: float = 0.5 # EMA decay rate for target networks
     """EMA decay rate (typically 0.999-0.9999)"""
     # Removed noise_clip as it's TD3 specific, not canonical DDPG or this HJB variant
 
     # Exploration noise annealing parameters
-    exploration_noise_start: float = 0.2
+    exploration_noise_start: float = 0.1
     """initial exploration noise scale"""
     exploration_noise_end: float = 0.1
     """final exploration noise scale"""
@@ -84,9 +84,9 @@ class Args:
     """Frequency (in global steps) to check model accuracy and retrain if needed"""
     model_dataset_size: int = 50000 # Size of dataset sampled for model training/validation
     """Number of samples drawn from the buffer for model training/validation"""
-    dynamic_train_threshold: float = 0.01
+    dynamic_train_threshold: float = 0.001
     """validation loss threshold to consider dynamic model accurate enough"""
-    reward_train_threshold: float = 0.01
+    reward_train_threshold: float = 0.001
     """validation loss threshold to consider reward model accurate enough"""
     model_val_ratio: float = 0.2 # Unified validation ratio
     """ratio of validation data for model training"""
@@ -100,7 +100,7 @@ class Args:
     """batch size for training models"""
     grad_norm_clip: Optional[float] = 0.5 # Gradient clipping for actor/critic
     """gradient norm clipping threshold (None for no clipping)"""
-    terminal_coeff: float = 1.0
+    terminal_coeff: float = 1e0
     """weighting coefficient for terminal state value loss component"""
 
 
@@ -654,19 +654,20 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 compute_value_grad2 = grad(lambda x: critic(x, critic_net=2).sum())
                 dVdx1_non_term = vmap(compute_value_grad1)(obs_non_term)
                 dVdx2_non_term = vmap(compute_value_grad2)(obs_non_term)
-                
-                # HJB residuals
-                hjb_residual1 = (r_non_term + torch.einsum("bi,bi->b", dVdx1_non_term, f_non_term)) - rho * min_v_non_term
-                hjb_residual2 = (r_non_term + torch.einsum("bi,bi->b", dVdx2_non_term, f_non_term)) - rho * min_v_non_term
-                
+
                 # Viscosity regularization
                 hessians1 = vmap(hessian(lambda x: critic(x, critic_net=1)))(obs_non_term)
                 hessians2 = vmap(hessian(lambda x: critic(x, critic_net=2)))(obs_non_term)
                 laplacians1 = torch.einsum('bii->b', hessians1)
                 laplacians2 = torch.einsum('bii->b', hessians2)
+                # HJB residuals
+                hjb_residual1 = (r_non_term + torch.einsum("bi,bi->b", dVdx1_non_term, f_non_term)) - rho * min_v_non_term - args.viscosity_coeff * laplacians1
+                hjb_residual2 = (r_non_term + torch.einsum("bi,bi->b", dVdx2_non_term, f_non_term)) - rho * min_v_non_term - args.viscosity_coeff * laplacians2
                 
-                hjb_loss1_non_term = 0.5 * (hjb_residual1**2).mean() + args.viscosity_coeff * (laplacians1**2).mean()
-                hjb_loss2_non_term = 0.5 * (hjb_residual2**2).mean() + args.viscosity_coeff * (laplacians2**2).mean()
+                
+                
+                hjb_loss1_non_term = 0.5 * (hjb_residual1**2).mean()
+                hjb_loss2_non_term = 0.5 * (hjb_residual2**2).mean()
 
             # --- C. Total Critic Loss ---
             critic_loss = hjb_loss1_non_term + hjb_loss2_non_term + args.terminal_coeff * terminal_critic_loss

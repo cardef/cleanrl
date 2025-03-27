@@ -609,35 +609,66 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             with torch.no_grad():
                 current_actions_ema = ema_actor(mb_obs)
 
-            # Compute gradients for both critics
-            compute_value_grad1 = grad(lambda x: critic(x, critic_net=1))
-            compute_value_grad2 = grad(lambda x: critic(x, critic_net=2))
-            dVdx1 = vmap(compute_value_grad1)(mb_obs)
-            dVdx2 = vmap(compute_value_grad2)(mb_obs)
+            # 1. Create Masks for terminal/non-terminal states
+            terminations_mask = data.dones.squeeze(-1).bool()
+            non_terminations_mask = ~terminations_mask
 
-            # Shared dynamics and reward predictions
-            f = dynamic_model.ode_func(torch.tensor(0.0, device=device), mb_obs, current_actions_ema)
-            r = reward_model(mb_obs, current_actions_ema)
+            # Calculate critic values for all states
+            all_current_v1 = critic(mb_obs, critic_net=1) 
+            all_current_v2 = critic(mb_obs, critic_net=2)
 
-            # Get minimum of both critics' value estimates
-            current_v1 = critic(mb_obs, critic_net=1)
-            current_v2 = critic(mb_obs, critic_net=2)
-            min_v = torch.min(current_v1, current_v2)
+            # --- A. Terminal State Loss ---
+            v1_at_termination = all_current_v1[terminations_mask]
+            v2_at_termination = all_current_v2[terminations_mask]
+            terminal_critic_loss = torch.tensor(0.0, device=device)
+            if v1_at_termination.numel() > 0:
+                terminal_loss1 = F.mse_loss(v1_at_termination, torch.zeros_like(v1_at_termination))
+                terminal_loss2 = F.mse_loss(v2_at_termination, torch.zeros_like(v2_at_termination))
+                terminal_critic_loss = terminal_loss1 + terminal_loss2
 
-            # Calculate HJB residuals with clipped V
-            hjb_residual1 = (r + torch.einsum("bi,bi->b", dVdx1, f)) - (rho * min_v)
-            hjb_residual2 = (r + torch.einsum("bi,bi->b", dVdx2, f)) - (rho * min_v)
+            # --- B. Non-Terminal State Loss --- 
+            hjb_loss1_non_term = torch.tensor(0.0, device=device)
+            hjb_loss2_non_term = torch.tensor(0.0, device=device)
 
-            # Add viscosity regularization
-            hessians1 = vmap(hessian(lambda x: critic(x, critic_net=1)))(mb_obs)
-            hessians2 = vmap(hessian(lambda x: critic(x, critic_net=2)))(mb_obs)
-            laplacians1 = torch.einsum('bii->b', hessians1)
-            laplacians2 = torch.einsum('bii->b', hessians2)
+            if non_terminations_mask.any():
+                obs_non_term = mb_obs[non_terminations_mask]
+                actions_ema_non_term = current_actions_ema[non_terminations_mask]
+                
+                # Get minimum V for non-terminal states
+                v1_non_term = all_current_v1[non_terminations_mask]
+                v2_non_term = all_current_v2[non_terminations_mask]
+                min_v_non_term = torch.min(v1_non_term, v2_non_term)
+                
+                # Calculate dynamics and reward
+                f_non_term = dynamic_model.ode_func(
+                    torch.tensor(0.0, device=device), 
+                    obs_non_term,
+                    actions_ema_non_term
+                )
+                r_non_term = reward_model(obs_non_term, actions_ema_non_term)
+                
+                # Compute gradients for non-terminal states
+                compute_value_grad1 = grad(lambda x: critic(x, critic_net=1).sum())
+                compute_value_grad2 = grad(lambda x: critic(x, critic_net=2).sum())
+                dVdx1_non_term = vmap(compute_value_grad1)(obs_non_term)
+                dVdx2_non_term = vmap(compute_value_grad2)(obs_non_term)
+                
+                # HJB residuals
+                hjb_residual1 = (r_non_term + torch.einsum("bi,bi->b", dVdx1_non_term, f_non_term)) - rho * min_v_non_term
+                hjb_residual2 = (r_non_term + torch.einsum("bi,bi->b", dVdx2_non_term, f_non_term)) - rho * min_v_non_term
+                
+                # Viscosity regularization
+                hessians1 = vmap(hessian(lambda x: critic(x, critic_net=1)))(obs_non_term)
+                hessians2 = vmap(hessian(lambda x: critic(x, critic_net=2)))(obs_non_term)
+                laplacians1 = torch.einsum('bii->b', hessians1)
+                laplacians2 = torch.einsum('bii->b', hessians2)
+                
+                hjb_loss1_non_term = 0.5 * (hjb_residual1**2).mean() + args.viscosity_coeff * (laplacians1**2).mean()
+                hjb_loss2_non_term = 0.5 * (hjb_residual2**2).mean() + args.viscosity_coeff * (laplacians2**2).mean()
 
-            # Loss components
-            hjb_loss1 = 0.5 * (hjb_residual1**2).mean() + args.viscosity_coeff * (laplacians1**2).mean()
-            hjb_loss2 = 0.5 * (hjb_residual2**2).mean() + args.viscosity_coeff * (laplacians2**2).mean()
-            critic_loss = hjb_loss1 + hjb_loss2
+            # --- C. Total Critic Loss ---
+            lambda_terminal = 1.0  # Could add to args if needed
+            critic_loss = hjb_loss1_non_term + hjb_loss2_non_term + lambda_terminal * terminal_critic_loss
 
             # Optimize both critics
             critic1_optimizer.zero_grad()
@@ -701,11 +732,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                 # Logging Actor/Critic Updates
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)
-                writer.add_scalar("losses/critic1_loss", hjb_loss1.item(), global_step)
-                writer.add_scalar("losses/critic2_loss", hjb_loss2.item(), global_step)
-                writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
-                writer.add_scalar("metrics/critic1_value", current_v1.mean().item(), global_step)
-                writer.add_scalar("metrics/critic2_value", current_v2.mean().item(), global_step)
+                writer.add_scalar("losses/critic_terminal_loss", terminal_critic_loss.item(), global_step)
+                writer.add_scalar("losses/critic1_hjb_non_term", hjb_loss1_non_term.item(), global_step)
+                writer.add_scalar("losses/critic2_hjb_non_term", hjb_loss2_non_term.item(), global_step)
+                writer.add_scalar("losses/actor_non_term", actor_loss.item(), global_step)
+                writer.add_scalar("metrics/critic1_value", all_current_v1.mean().item(), global_step)
+                writer.add_scalar("metrics/critic2_value", all_current_v2.mean().item(), global_step)
                 writer.add_scalar("metrics/hamiltonian", hamiltonian_actor.mean().item(), global_step)
 
 

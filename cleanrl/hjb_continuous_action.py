@@ -596,11 +596,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             hjb_residual = hamiltonian - rho * current_v  # Shape: (batch_size,)
 
             # Create mask for terminal states
-            terminations = data.terminations.squeeze(-1).bool()  # Convert to boolean mask
+            dones = data.dones.squeeze(-1).bool()  # Convert to boolean mask
 
             # Split loss into terminal and non-terminal components
-            non_terminal_mask = ~terminations
-            terminal_mask = terminations
+            non_terminal_mask = ~dones
+            terminal_mask = dones
 
             # HJB loss for non-terminal states
             hjb_loss = 0.5 * (hjb_residual[non_terminal_mask] ** 2).mean()
@@ -648,7 +648,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 hamiltonian_actor = r_actor + torch.einsum("bi,bi->b", dVdx_detached, f_actor)
 
                 # Create mask for transitions where next state is NON-terminal (same as critic)
-                non_terminal_mask = ~data.terminations.squeeze(-1).bool()
+                non_terminal_mask = ~data.dones.squeeze(-1).bool()
                 hamiltonian_non_term = hamiltonian_actor[non_terminal_mask]
 
                 # Skip update if no non-terminal transitions in batch

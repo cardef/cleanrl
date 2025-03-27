@@ -69,6 +69,14 @@ class Args:
     """EMA decay rate (typically 0.999-0.9999)"""
     # Removed noise_clip as it's TD3 specific, not canonical DDPG or this HJB variant
 
+    # Exploration noise annealing parameters
+    exploration_noise_start: float = 0.5
+    """initial exploration noise scale"""
+    exploration_noise_end: float = 0.1
+    """final exploration noise scale"""
+    exploration_noise_anneal_fraction: float = 0.8
+    """fraction of total timesteps over which to anneal noise"""
+
     # Model Training specific arguments
     model_train_freq: int = 1000 # Frequency to check and potentially retrain models
     """Frequency (in global steps) to check model accuracy and retrain if needed"""
@@ -421,9 +429,21 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
             with torch.no_grad():
+                # Calculate annealed noise scale
+                if args.exploration_noise_anneal_fraction > 0:
+                    anneal_steps = int(args.total_timesteps * args.exploration_noise_anneal_fraction)
+                    current_noise_scale = args.exploration_noise_end + (
+                        args.exploration_noise_start - args.exploration_noise_end
+                    ) * (1 - min(global_step / anneal_steps, 1))
+                else:
+                    current_noise_scale = args.exploration_noise_start
+                    
                 actions = ema_actor(torch.Tensor(obs).to(device))
-                actions += torch.normal(0, actor.action_scale * args.exploration_noise)
+                actions += torch.normal(0, actor.action_scale * current_noise_scale)
                 actions = actions.cpu().numpy().clip(envs.single_action_space.low, envs.single_action_space.high)
+
+            # Log the current noise scale
+            writer.add_scalar("charts/exploration_noise_scale", current_noise_scale, global_step)
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
@@ -684,7 +704,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("metrics/hjb_residual", hjb_residual.mean().item(), global_step)
 
 
-            # Log SPS
+            # Log SPS and exploration noise
             if global_step % 100 == 0: # Log less frequently
                 sps = int(global_step / (time.time() - start_time))
                 print(f"SPS: {sps}")

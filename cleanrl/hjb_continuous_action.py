@@ -200,19 +200,30 @@ class RewardModel(nn.Module):
 # --- Agent Network Definitions ---
 
 class HJBCritic(nn.Module):
-    """Value function V(x)."""
+    """Value function V(x) with double Q-networks."""
     def __init__(self, env):
         super().__init__()
         obs_dim = np.array(env.observation_space.shape).prod()
-        self.fc1 = nn.Linear(obs_dim, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 1)
+        self.critic1 = nn.Sequential(
+            nn.Linear(obs_dim, 256),
+            nn.SiLU(),
+            nn.Linear(256, 256),
+            nn.SiLU(),
+            nn.Linear(256, 1),
+        )
+        self.critic2 = nn.Sequential(
+            nn.Linear(obs_dim, 256),
+            nn.SiLU(),
+            nn.Linear(256, 256),
+            nn.SiLU(),
+            nn.Linear(256, 1),
+        )
 
-    def forward(self, x):
-        x = F.silu(self.fc1(x))
-        x = F.silu(self.fc2(x))
-        x = self.fc3(x).squeeze(-1) # Output shape: (batch_size,)
-        return x
+    def forward(self, x, critic_net=1):
+        """Forward pass through specified critic network (1 or 2)."""
+        if critic_net == 1:
+            return self.critic1(x).squeeze(-1)
+        return self.critic2(x).squeeze(-1)
 
 class HJBActor(nn.Module):
     """Policy function pi(x)."""
@@ -382,15 +393,20 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     actor = HJBActor(envs).to(device)
     critic = HJBCritic(envs).to(device)
     actor_optimizer = optim.AdamW(actor.parameters(), lr=args.learning_rate)
-    critic_optimizer = optim.AdamW(critic.parameters(), lr=args.learning_rate)
+    critic1_optimizer = optim.AdamW(critic.critic1.parameters(), lr=args.learning_rate)
+    critic2_optimizer = optim.AdamW(critic.critic2.parameters(), lr=args.learning_rate)
 
     # EMA models for stability
     ema_actor = torch.optim.swa_utils.AveragedModel(
         actor,
         multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(args.ema_decay)
     )
-    ema_critic = torch.optim.swa_utils.AveragedModel(
-        critic,
+    ema_critic1 = torch.optim.swa_utils.AveragedModel(
+        critic.critic1,
+        multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(args.ema_decay)
+    )
+    ema_critic2 = torch.optim.swa_utils.AveragedModel(
+        critic.critic2,
         multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(args.ema_decay)
     )
 
@@ -590,62 +606,52 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             mb_obs.requires_grad_(True) # Enable gradient tracking for observations
 
             # --- Critic Update ---
-            # Calculate dV/dx using the EMA critic for stability
-            compute_value_grad = grad(lambda x: critic(x))
-            # Use vmap for batch processing
-            dVdx = vmap(compute_value_grad)(mb_obs)  # Shape: (batch_size, obs_dim)
-
-            # Compute exact Laplacian (trace of Hessian) for viscosity term
-            hessians = vmap(hessian(critic, argnums=0))(mb_obs)
-            laplacians = torch.einsum('bii->b', hessians)  # Trace of Hessian for each sample
-
-            # Get actions from the current (non-EMA) actor for the actor loss calculation later
-            # but use EMA actor actions for HJB residual calculation for consistency with dVdx source
             with torch.no_grad():
                 current_actions_ema = ema_actor(mb_obs)
 
-            # Predict dynamics f(x, pi(x)) using the learned dynamic model's ODE function
-            f = dynamic_model.ode_func(
-                torch.tensor(0.0, device=device),  # t=0
-                mb_obs,
-                current_actions_ema  # Use EMA actions consistent with dVdx source
-            )  # Shape: (batch_size, obs_dim)
+            # Compute gradients for both critics
+            compute_value_grad1 = grad(lambda x: critic(x, critic_net=1))
+            compute_value_grad2 = grad(lambda x: critic(x, critic_net=2))
+            dVdx1 = vmap(compute_value_grad1)(mb_obs)
+            dVdx2 = vmap(compute_value_grad2)(mb_obs)
 
-            # Predict reward r(x, pi(x)) using the learned reward model
-            r = reward_model(mb_obs, current_actions_ema)  # Shape: (batch_size,)
+            # Shared dynamics and reward predictions
+            f = dynamic_model.ode_func(torch.tensor(0.0, device=device), mb_obs, current_actions_ema)
+            r = reward_model(mb_obs, current_actions_ema)
 
-            # Calculate the Hamiltonian H(x, pi(x), dV/dx) = r(x, pi(x)) + dV/dx^T * f(x, pi(x))
-            hamiltonian = r + torch.einsum("bi,bi->b", dVdx, f)  # Shape: (batch_size,)
+            # Get minimum of both critics' value estimates
+            current_v1 = critic(mb_obs, critic_net=1)
+            current_v2 = critic(mb_obs, critic_net=2)
+            min_v = torch.min(current_v1, current_v2)
 
-            # Calculate the HJB residual: H - rho * V(x)
-            current_v = critic(mb_obs)  # Shape: (batch_size,)
-            hjb_residual = hamiltonian - rho * current_v - args.viscosity_coeff * laplacians  # Shape: (batch_size,)
+            # Calculate HJB residuals with clipped V
+            hjb_residual1 = (r + torch.einsum("bi,bi->b", dVdx1, f)) - (rho * min_v)
+            hjb_residual2 = (r + torch.einsum("bi,bi->b", dVdx2, f)) - (rho * min_v)
 
-            # Create mask for terminal states
-            dones = data.dones.squeeze(-1).bool()  # Convert to boolean mask
+            # Add viscosity regularization
+            hessians1 = vmap(hessian(lambda x: critic(x, critic_net=1)))(mb_obs)
+            hessians2 = vmap(hessian(lambda x: critic(x, critic_net=2)))(mb_obs)
+            laplacians1 = torch.einsum('bii->b', hessians1)
+            laplacians2 = torch.einsum('bii->b', hessians2)
 
-            # Split loss into terminal and non-terminal components
-            non_terminal_mask = ~dones
-            terminal_mask = dones
+            # Loss components
+            hjb_loss1 = 0.5 * (hjb_residual1**2).mean() + args.viscosity_coeff * (laplacians1**2).mean()
+            hjb_loss2 = 0.5 * (hjb_residual2**2).mean() + args.viscosity_coeff * (laplacians2**2).mean()
+            critic_loss = hjb_loss1 + hjb_loss2
 
-            # HJB loss for non-terminal states
-            hjb_loss = 0.5 * (hjb_residual[non_terminal_mask] ** 2).mean()
-
-            # Terminal state loss (force V(s_terminal) = 0)
-            terminal_loss = 0.5 * (current_v[terminal_mask] ** 2).mean()
-
-            # Combine losses with viscosity regularization
-            critic_loss = hjb_loss + terminal_loss
-
-            # Optimize the critic
-            critic_optimizer.zero_grad()
+            # Optimize both critics
+            critic1_optimizer.zero_grad()
+            critic2_optimizer.zero_grad()
             critic_loss.backward()
             if args.grad_norm_clip is not None:
-                nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
-            critic_optimizer.step()
+                nn.utils.clip_grad_norm_(critic.critic1.parameters(), args.grad_norm_clip)
+                nn.utils.clip_grad_norm_(critic.critic2.parameters(), args.grad_norm_clip)
+            critic1_optimizer.step()
+            critic2_optimizer.step()
 
-            # Update EMA Critic
-            ema_critic.update_parameters(critic)
+            # Update EMA critics
+            ema_critic1.update_parameters(critic.critic1)
+            ema_critic2.update_parameters(critic.critic2)
 
 
             # --- Actor Update (Delayed) ---
@@ -655,23 +661,16 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 # Recalculate H with actions from the *current* actor.
                 # dVdx was calculated using EMA critic, treat it as constant for actor update.
 
-                # Detach dVdx as we don't want gradients flowing back to the critic from the actor loss
-                compute_value_grad = grad(lambda x: ema_critic(x))
-                dVdx_detached = vmap(compute_value_grad)(mb_obs).detach()
+                # Use critic1's gradients for actor update
+                with torch.no_grad():
+                    compute_value_grad1 = grad(lambda x: ema_critic1(x))
+                    dVdx1 = vmap(compute_value_grad1)(mb_obs)
 
-                # Get actions from the *current* actor
                 current_actions_actor = actor(mb_obs)
-
-                # Recalculate f and r with current actor's actions
-                f_actor = dynamic_model.ode_func(
-                    torch.tensor(0.0, device=device),
-                    mb_obs, # mb_obs still requires grad here
-                    current_actions_actor
-                )
+                f_actor = dynamic_model.ode_func(torch.tensor(0.0, device=device), mb_obs, current_actions_actor)
                 r_actor = reward_model(mb_obs, current_actions_actor)
 
-                # Recalculate Hamiltonian using current actor's actions
-                hamiltonian_actor = r_actor + torch.einsum("bi,bi->b", dVdx_detached, f_actor)
+                hamiltonian_actor = r_actor + torch.einsum("bi,bi->b", dVdx1, f_actor)
 
                 # Create mask for transitions where next state is NON-terminal (same as critic)
                 non_terminal_mask = ~data.dones.squeeze(-1).bool()

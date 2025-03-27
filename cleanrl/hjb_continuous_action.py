@@ -701,12 +701,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                 # Logging Actor/Critic Updates
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)
-                writer.add_scalar("losses/hjb_loss", hjb_loss.item(), global_step)
-                writer.add_scalar("losses/terminal_loss", terminal_loss.item(), global_step)
+                writer.add_scalar("losses/critic1_loss", hjb_loss1.item(), global_step)
+                writer.add_scalar("losses/critic2_loss", hjb_loss2.item(), global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
-                writer.add_scalar("losses/critic_values", current_v.mean().item(), global_step)
-                writer.add_scalar("metrics/hamiltonian", hamiltonian.mean().item(), global_step)
-                writer.add_scalar("metrics/hjb_residual", hjb_residual.mean().item(), global_step)
+                writer.add_scalar("metrics/critic1_value", current_v1.mean().item(), global_step)
+                writer.add_scalar("metrics/critic2_value", current_v2.mean().item(), global_step)
+                writer.add_scalar("metrics/hamiltonian", hamiltonian_actor.mean().item(), global_step)
 
 
             # Log SPS and exploration noise
@@ -725,7 +725,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     # Using deepcopy might be safer if EMA model is used elsewhere.
     import copy
     actor_final = copy.deepcopy(ema_actor.module).to('cpu')
-    critic_final = copy.deepcopy(ema_critic.module).to('cpu')
+    # Create final critic by combining both EMA critics
+    critic_final = HJBCritic(envs).to('cpu')
+    critic_final.critic1.load_state_dict(ema_critic1.module.state_dict())
+    critic_final.critic2.load_state_dict(ema_critic2.module.state_dict())
 
 
     if args.save_model:

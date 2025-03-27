@@ -100,6 +100,8 @@ class Args:
     """batch size for training models"""
     grad_norm_clip: Optional[float] = 0.5 # Gradient clipping for actor/critic
     """gradient norm clipping threshold (None for no clipping)"""
+    terminal_coeff: float = 1.0
+    """weighting coefficient for terminal state value loss component"""
 
 
 def make_env(env_id, seed, idx, capture_video, run_name):
@@ -667,8 +669,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 hjb_loss2_non_term = 0.5 * (hjb_residual2**2).mean() + args.viscosity_coeff * (laplacians2**2).mean()
 
             # --- C. Total Critic Loss ---
-            lambda_terminal = 1.0  # Could add to args if needed
-            critic_loss = hjb_loss1_non_term + hjb_loss2_non_term + lambda_terminal * terminal_critic_loss
+            critic_loss = hjb_loss1_non_term + hjb_loss2_non_term + args.terminal_coeff * terminal_critic_loss
 
             # Optimize both critics
             critic1_optimizer.zero_grad()

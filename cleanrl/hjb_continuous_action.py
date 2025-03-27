@@ -652,10 +652,17 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 dVdx2_non_term = vmap(compute_value_grad2)(obs_non_term)
 
                 # Viscosity regularization
-                hessians1 = vmap(hessian(lambda x: critic(x, critic_net=1)))(obs_non_term)
-                hessians2 = vmap(hessian(lambda x: critic(x, critic_net=2)))(obs_non_term)
-                laplacians1 = torch.einsum('bii->b', hessians1)
-                laplacians2 = torch.einsum('bii->b', hessians2)
+                if args.viscosity_coeff > 0:
+                    hessians1 = vmap(hessian(lambda x: critic(x, critic_net=1)))(obs_non_term)
+                    laplacians1 = torch.einsum('bii->b', hessians1)
+                    hessians2 = vmap(hessian(lambda x: critic(x, critic_net=2)))(obs_non_term)
+                    laplacians2 = torch.einsum('bii->b', hessians2)
+                else:
+                    # Create zero tensors with appropriate shape to avoid None errors
+                    batch_size_non_term = obs_non_term.shape[0]
+                    laplacians1 = torch.zeros(batch_size_non_term, device=device)
+                    laplacians2 = torch.zeros(batch_size_non_term, device=device)
+
                 # HJB residuals
                 hjb_residual1 = (r_non_term + torch.einsum("bi,bi->b", dVdx1_non_term, f_non_term)) - rho * min_v_non_term - args.viscosity_coeff * laplacians1
                 hjb_residual2 = (r_non_term + torch.einsum("bi,bi->b", dVdx2_non_term, f_non_term)) - rho * min_v_non_term - args.viscosity_coeff * laplacians2

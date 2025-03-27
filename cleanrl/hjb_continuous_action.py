@@ -569,39 +569,47 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
             # --- Critic Update ---
             # Calculate dV/dx using the EMA critic for stability
-            # Need to wrap the EMA model call for grad
-            
             compute_value_grad = grad(lambda x: critic(x))
             # Use vmap for batch processing
-            dVdx = vmap(compute_value_grad)(mb_obs) # Shape: (batch_size, obs_dim)
+            dVdx = vmap(compute_value_grad)(mb_obs)  # Shape: (batch_size, obs_dim)
 
             # Get actions from the current (non-EMA) actor for the actor loss calculation later
             # but use EMA actor actions for HJB residual calculation for consistency with dVdx source
             with torch.no_grad():
-                 current_actions_ema = ema_actor(mb_obs)
+                current_actions_ema = ema_actor(mb_obs)
 
             # Predict dynamics f(x, pi(x)) using the learned dynamic model's ODE function
-            # Note: We need the *function* f, not the integrated next state
             f = dynamic_model.ode_func(
-                torch.tensor(0.0, device=device), # t=0
+                torch.tensor(0.0, device=device),  # t=0
                 mb_obs,
-                current_actions_ema # Use EMA actions consistent with dVdx source
-            ) # Shape: (batch_size, obs_dim)
+                current_actions_ema  # Use EMA actions consistent with dVdx source
+            )  # Shape: (batch_size, obs_dim)
 
             # Predict reward r(x, pi(x)) using the learned reward model
-            r = reward_model(mb_obs, current_actions_ema) # Shape: (batch_size,)
+            r = reward_model(mb_obs, current_actions_ema)  # Shape: (batch_size,)
 
             # Calculate the Hamiltonian H(x, pi(x), dV/dx) = r(x, pi(x)) + dV/dx^T * f(x, pi(x))
-            # Use torch.einsum for robust batch dot product
-            hamiltonian = r + torch.einsum("bi,bi->b", dVdx, f) # Shape: (batch_size,)
+            hamiltonian = r + torch.einsum("bi,bi->b", dVdx, f)  # Shape: (batch_size,)
 
             # Calculate the HJB residual: H - rho * V(x)
-            # Use the *current* critic (not EMA) for the V(x) term, as this is what we are optimizing
-            current_v = critic(mb_obs) # Shape: (batch_size,)
-            hjb_residual = hamiltonian - rho * current_v # Shape: (batch_size,)
+            current_v = critic(mb_obs)  # Shape: (batch_size,)
+            hjb_residual = hamiltonian - rho * current_v  # Shape: (batch_size,)
 
-            # Critic loss: 0.5 * MSE of the HJB residual
-            critic_loss = 0.5 * (hjb_residual ** 2).mean()
+            # Create mask for terminal states
+            terminations = data.terminations.squeeze(-1).bool()  # Convert to boolean mask
+
+            # Split loss into terminal and non-terminal components
+            non_terminal_mask = ~terminations
+            terminal_mask = terminations
+
+            # HJB loss for non-terminal states
+            hjb_loss = 0.5 * (hjb_residual[non_terminal_mask] ** 2).mean()
+
+            # Terminal state loss (force V(s_terminal) = 0)
+            terminal_loss = 0.5 * (current_v[terminal_mask] ** 2).mean()
+
+            # Combine losses with equal weighting
+            critic_loss = hjb_loss + terminal_loss
 
             # Optimize the critic
             critic_optimizer.zero_grad()
@@ -659,9 +667,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                 # Logging Actor/Critic Updates
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)
+                writer.add_scalar("losses/hjb_loss", hjb_loss.item(), global_step)
+                writer.add_scalar("losses/terminal_loss", terminal_loss.item(), global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
                 writer.add_scalar("losses/critic_values", current_v.mean().item(), global_step)
-                writer.add_scalar("metrics/hamiltonian", hamiltonian.mean().item(), global_step) # Log Hamiltonian from critic step
+                writer.add_scalar("metrics/hamiltonian", hamiltonian.mean().item(), global_step)
                 writer.add_scalar("metrics/hjb_residual", hjb_residual.mean().item(), global_step)
 
 

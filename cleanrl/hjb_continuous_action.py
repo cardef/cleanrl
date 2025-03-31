@@ -544,7 +544,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     # Continuous-time discount rate (rho) based on discrete gamma and dt
     # gamma = exp(-rho * dt) => rho = -log(gamma) / dt
-    rho = -torch.log(torch.tensor(args.gamma, device=device)) / env_dt
+    rho = -torch.log(torch.tensor(args.gamma, device=device))
     print(f"Continuous discount rate (rho): {rho.item()}")
 
     start_time = time.time()

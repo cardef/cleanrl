@@ -286,6 +286,26 @@ class Agent(nn.Module):
         return action, log_prob, entropy, value
 
 
+# --- GAE Calculation (Simplified for Rollouts) ---
+def compute_gae_for_rollout(rewards, values, dones, gamma, gae_lambda, next_value):
+    """Computes GAE for a rollout where dones are typically 0."""
+    num_steps = rewards.shape[0]
+    advantages = torch.zeros_like(rewards)
+    lastgaelam = 0
+    for t in reversed(range(num_steps)):
+        if t == num_steps - 1:
+            nextnonterminal = 1.0 - dones[t] # Should be 1.0 for model data
+            nextvalues = next_value.squeeze() # Use the provided final next value
+        else:
+            nextnonterminal = 1.0 - dones[t+1] # Should be 1.0
+            nextvalues = values[t+1]
+
+        delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
+        advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+    returns = advantages + values
+    return advantages, returns
+
+
 # --- GAE Calculation (Real Data - handles truncation) ---
 def compute_gae_real_data(
     real_rewards_storage_norm,
@@ -1006,6 +1026,8 @@ if __name__ == "__main__":
             validation_loss_reward = val_loss_reward.item() # Store the final reward loss as well
 
             # Calculate final masked R2 score (using the same predictions and targets)
+            # Define non_terminal_indices based on the val_mask used for state loss
+            non_terminal_indices = val_mask.squeeze().nonzero(as_tuple=False).squeeze(-1)
             if non_terminal_indices.numel() > 0:
                 filtered_pred = next_obs_norm_pred_val[non_terminal_indices]
                 filtered_target = next_obs_val_batch_target[non_terminal_indices]

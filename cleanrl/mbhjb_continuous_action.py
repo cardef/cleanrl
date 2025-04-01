@@ -121,7 +121,7 @@ class Args:
     replay_buffer_size: int = 1_000_000
     model_train_batch_size: int = 256
     model_train_freq: int = 250
-    model_train_epochs: int = 100  # Max epochs per training phase
+    model_train_epochs: int = 1000  # Max epochs per training phase
     model_rollout_freq: int = 1000
     model_rollout_length: int = 5
     model_rollout_batch_size: int = 4096  # Target size
@@ -130,12 +130,12 @@ class Args:
 
     # Model Validation Args
     model_validation_batch_size: int = 1024
-    model_state_accuracy_threshold: float = 0.05
-    model_early_stopping_patience: int = 10
-    model_validation_freq: int = 10
+    model_state_accuracy_threshold: float = 1.5
+    model_early_stopping_patience: int = 50
+    model_validation_freq: int = 1
 
     # HJB Residual Args
-    hjb_coef: float = 0.1
+    hjb_coef: float = 0.5
     use_hjb_loss: bool = True
 
     # Environment dt
@@ -649,7 +649,7 @@ if __name__ == "__main__":
                 if dones_cpu[i]:
                     is_truncated = infos[i].get("TimeLimit.truncated", False)
                     if is_truncated and "terminal_observation" in infos[i]:
-                        original_next_obs_np[i] = infos[i]["terminal_observation"]
+                        original_next_obs_np[i] = infos[i]["terminal_observation"] #infos[i]["terminal_observation"] is normalized? ai!
                     else:  # True termination or missing terminal_obs
                         original_next_obs_np[i] = norm_envs.unnormalize_obs(
                             next_obs_norm_cpu[i]

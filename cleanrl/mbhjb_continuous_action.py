@@ -919,66 +919,123 @@ if __name__ == "__main__":
                 final_validation_loss_reward = best_val_loss_reward
             
 
-            # Final validation for R2 and accuracy flag using loaded/final models
-            dynamic_model.eval()
-            reward_model.eval()
+            # <<< Early Stopping Change: Perform final validation calculation AFTER potentially loading best models >>>
+            # This block runs regardless of whether early stopping occurred or best models were loaded.
+            # It calculates the validation metrics based on the model state that will actually be used.
+            print("--- Final Validation Debug ---") # Add identifier
+            # 1. Check Normalization Stats BEFORE validation sampling
+            try:
+                obs_var = norm_envs.obs_rms.var
+                ret_var = norm_envs.ret_rms.var
+                print(f"DEBUG: Final Val - Obs RMS Var (Min/Max/Mean): {obs_var.min():.4e} / {obs_var.max():.4e} / {obs_var.mean():.4e}")
+                print(f"DEBUG: Final Val - Ret RMS Var: {ret_var.item():.4e}")
+                # Add asserts if you want to halt on bad variance (adjust epsilon)
+                # assert np.all(obs_var > 1e-8), "Obs variance too low!"
+                # assert ret_var > 1e-8, "Reward variance too low!"
+            except Exception as e:
+                print(f"DEBUG: Error checking norm stats: {e}")
+
+            dynamic_model.eval(); reward_model.eval()
             val_samples_tensors = real_buffer.sample(args.model_validation_batch_size)
-            obs_raw_tensor_val = val_samples_tensors.observations
-            actions_tensor_val = val_samples_tensors.actions
-            rewards_raw_tensor_val = val_samples_tensors.rewards
-            next_obs_raw_tensor_val = val_samples_tensors.next_observations
-            dones_tensor_val = val_samples_tensors.dones
-            obs_raw_np_val = obs_raw_tensor_val.cpu().numpy()
-            next_obs_raw_np_val = next_obs_raw_tensor_val.cpu().numpy()
-            rewards_raw_np_val = rewards_raw_tensor_val.cpu().numpy()
-            obs_norm_np_val = norm_envs.normalize_obs(obs_raw_np_val)
-            next_obs_norm_np_val = norm_envs.normalize_obs(next_obs_raw_np_val)
-            rewards_norm_np_val = norm_envs.normalize_reward(
-                rewards_raw_np_val.reshape(-1)
-            ).reshape(-1, 1)
-            obs_val_batch = torch.tensor(obs_norm_np_val, dtype=torch.float32).to(
-                device
-            )
-            action_val_batch = actions_tensor_val.to(device)
-            reward_val_batch_target = torch.tensor(
-                rewards_norm_np_val, dtype=torch.float32
-            ).to(device)
-            next_obs_val_batch_target = torch.tensor(
-                next_obs_norm_np_val, dtype=torch.float32
-            ).to(device)
-            dones_val_batch = dones_tensor_val.to(device).float()
+            # Convert/Normalize validation data...
+            # 2. Check data immediately AFTER sampling
+            assert not torch.isnan(val_samples_tensors.observations).any(), "NaN in sampled raw obs"
+            assert not torch.isnan(val_samples_tensors.next_observations).any(), "NaN in sampled raw next_obs"
+            assert not torch.isnan(val_samples_tensors.rewards).any(), "NaN in sampled raw rewards"
+            assert not torch.isnan(val_samples_tensors.dones).any(), "NaN in sampled raw dones"
+            assert not torch.isnan(val_samples_tensors.actions).any(), "NaN in sampled raw actions"
+
+            obs_raw_tensor_val=val_samples_tensors.observations;actions_tensor_val=val_samples_tensors.actions;rewards_raw_tensor_val=val_samples_tensors.rewards;next_obs_raw_tensor_val=val_samples_tensors.next_observations;dones_tensor_val=val_samples_tensors.dones
+            obs_raw_np_val=obs_raw_tensor_val.cpu().numpy();next_obs_raw_np_val=next_obs_raw_tensor_val.cpu().numpy();rewards_raw_np_val=rewards_raw_tensor_val.cpu().numpy()
+            obs_norm_np_val=norm_envs.normalize_obs(obs_raw_np_val);next_obs_norm_np_val=norm_envs.normalize_obs(next_obs_raw_np_val);rewards_norm_np_val=norm_envs.normalize_reward(rewards_raw_np_val.reshape(-1)).reshape(-1,1)
+            # 3. Check data AFTER normalization (NumPy)
+            assert not np.isnan(obs_norm_np_val).any(), "NaN detected AFTER normalize_obs (NumPy)"
+            assert not np.isnan(next_obs_norm_np_val).any(), "NaN detected AFTER normalize_obs (NumPy) for next_obs"
+            assert not np.isnan(rewards_norm_np_val).any(), "NaN detected AFTER normalize_reward (NumPy)"
+
+            obs_val_batch=torch.tensor(obs_norm_np_val,dtype=torch.float32).to(device);action_val_batch=actions_tensor_val.to(device);reward_val_batch_target=torch.tensor(rewards_norm_np_val,dtype=torch.float32).to(device);next_obs_val_batch_target=torch.tensor(next_obs_norm_np_val,dtype=torch.float32).to(device);dones_val_batch=dones_tensor_val.to(device).float() # Need dones tensor here too
+            # 4. Check data AFTER converting back to Tensor
+            assert not torch.isnan(obs_val_batch).any(), "NaN detected AFTER converting obs_norm to Tensor"
+            assert not torch.isnan(action_val_batch).any(), "NaN detected AFTER converting action to Tensor"
+            assert not torch.isnan(next_obs_val_batch_target).any(), "NaN detected AFTER converting next_obs_norm to Tensor"
+            assert not torch.isnan(reward_val_batch_target).any(), "NaN detected AFTER converting reward_norm to Tensor"
+
+            next_obs_norm_pred_val = torch.zeros_like(next_obs_val_batch_target) # Initialize dummy prediction
+            reward_norm_pred_val = torch.zeros_like(reward_val_batch_target) # Initialize dummy prediction
             with torch.no_grad():
-                next_obs_norm_pred_val = dynamic_model(obs_val_batch, action_val_batch)
-            # Calculate final masked R2 score
-            val_mask = 1.0 - dones_val_batch
-            if len(next_obs_norm_pred_val.shape) > len(val_mask.shape):
-                val_mask = val_mask.view(
-                    val_mask.shape[0],
-                    *([1] * (len(next_obs_norm_pred_val.shape) - len(val_mask.shape))),
-                )
-            non_terminal_indices = (
-                val_mask.squeeze().nonzero(as_tuple=False).squeeze(-1)
-            )
-            # Corrected nonzero usage
+                try:
+                    next_obs_norm_pred_val = dynamic_model(obs_val_batch, action_val_batch)
+                    reward_norm_pred_val = reward_model(obs_val_batch, action_val_batch)
+                    # 5. Check data AFTER model prediction
+                    assert not torch.isnan(next_obs_norm_pred_val).any(), "NaN detected AFTER dynamics model prediction"
+                    assert not torch.isinf(next_obs_norm_pred_val).any(), "Inf detected AFTER dynamics model prediction"
+                    assert not torch.isnan(reward_norm_pred_val).any(), "NaN detected AFTER reward model prediction"
+                    assert not torch.isinf(reward_norm_pred_val).any(), "Inf detected AFTER reward model prediction"
+                except Exception as e:
+                    print(f"DEBUG: Error during final validation model prediction: {e}")
+
+            # Calculate final masked State Val Loss and Reward Val Loss
+            val_loss_state = torch.tensor(float('nan')).to(device) # Default to NaN
+            val_loss_reward = torch.tensor(float('nan')).to(device) # Default to NaN
+            try:
+                val_state_mse_all = nn.functional.mse_loss(next_obs_norm_pred_val, next_obs_val_batch_target, reduction='none')
+                val_mask = 1.0 - dones_val_batch
+                if len(val_state_mse_all.shape) > len(val_mask.shape): val_mask = val_mask.view(val_mask.shape[0], *([1]*(len(val_state_mse_all.shape)-len(val_mask.shape))))
+                val_masked_state_mse = val_state_mse_all * val_mask
+                val_mask_sum = val_mask.sum().clamp(min=1.0)
+                # 6. Check intermediate loss values
+                assert not torch.isnan(val_state_mse_all).any(), "NaN detected in element-wise state mse"
+                assert not torch.isinf(val_state_mse_all).any(), "Inf detected in element-wise state mse"
+                assert not torch.isnan(val_masked_state_mse).any(), "NaN detected in masked state mse"
+                assert not torch.isinf(val_masked_state_mse).any(), "Inf detected in masked state mse"
+                assert not torch.isnan(val_mask_sum).any(), "NaN detected in mask sum"
+
+                val_loss_state = val_masked_state_mse.sum() / val_mask_sum
+                val_loss_reward = nn.functional.mse_loss(reward_norm_pred_val, reward_val_batch_target) # Final reward loss
+
+                # 7. Check final loss values
+                assert not torch.isnan(val_loss_state).any(), "NaN detected in final state loss calculation"
+                assert not torch.isinf(val_loss_state).any(), "Inf detected in final state loss calculation"
+                assert not torch.isnan(val_loss_reward).any(), "NaN detected in final reward loss calculation"
+                assert not torch.isinf(val_loss_reward).any(), "Inf detected in final reward loss calculation"
+            except Exception as e:
+                 print(f"DEBUG: Error during final validation loss calculation: {e}")
+
+            # These are the definitive final validation losses for this training phase
+            validation_loss_state = val_loss_state.item()
+            validation_loss_reward = val_loss_reward.item() # Store the final reward loss as well
+
+            # Calculate final masked R2 score (using the same predictions and targets)
             if non_terminal_indices.numel() > 0:
                 filtered_pred = next_obs_norm_pred_val[non_terminal_indices]
                 filtered_target = next_obs_val_batch_target[non_terminal_indices]
-                validation_r2_score = calculate_r2_score(
-                    filtered_target, filtered_pred
-                ).item()
+                # Add checks before R2 calculation
+                assert not torch.isnan(filtered_pred).any(), "NaN in filtered predictions for R2"
+                assert not torch.isinf(filtered_pred).any(), "Inf in filtered predictions for R2"
+                assert not torch.isnan(filtered_target).any(), "NaN in filtered targets for R2"
+                assert not torch.isinf(filtered_target).any(), "Inf in filtered targets for R2"
+                try:
+                    validation_r2_score = calculate_r2_score(
+                        filtered_target, filtered_pred
+                    ).item()
+                    assert not np.isnan(validation_r2_score), "NaN R2 score calculated"
+                    assert not np.isinf(validation_r2_score), "Inf R2 score calculated"
+                except Exception as e:
+                    print(f"DEBUG: Error calculating R2 score: {e}")
+                    validation_r2_score = np.nan
             else:
                 validation_r2_score = np.nan
-            # Update accuracy flag based on BEST recorded state validation loss
-            
+
+            # Update accuracy flag based on final calculated state validation loss
             model_is_accurate = validation_loss_state < args.model_state_accuracy_threshold
 
             writer.add_scalar(
-                "losses/dynamics_model_validation_loss_state",
+                "losses/dynamics_model_validation_loss_state", # Log the final state loss
                 validation_loss_state,
                 global_step,
             )
             writer.add_scalar(
-                "losses/reward_model_validation_loss",
+                "losses/reward_model_validation_loss", # Log the final reward loss
                 validation_loss_reward,
                 global_step,
             )

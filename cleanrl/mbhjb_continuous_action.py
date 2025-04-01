@@ -132,7 +132,7 @@ class Args:
     model_validation_batch_size: int = 1024
     model_state_accuracy_threshold: float = 0.05
     model_early_stopping_patience: int = 10
-    model_validation_freq: int = 10000
+    model_validation_freq: int = 10
 
     # HJB Residual Args
     hjb_coef: float = 0.1
@@ -798,6 +798,9 @@ if __name__ == "__main__":
                 if (model_epoch + 1) % args.model_validation_freq == 0:
                     dynamic_model.eval()
                     reward_model.eval()
+
+
+                    
                     val_samples_tensors = real_buffer.sample(
                         args.model_validation_batch_size
                     )
@@ -907,26 +910,14 @@ if __name__ == "__main__":
                     f"  Loaded best dynamics model state dict (Val Loss: {best_val_loss_state:.4f})"
                 )
                 final_validation_loss_state = best_val_loss_state
-            else:
-                print(
-                    f"  No improvement in dynamics validation loss, using final model state."
-                )
-                final_validation_loss_state = (
-                    current_val_loss_state  # Use last computed
-                )
+            
             if best_state_dict_reward is not None:
                 reward_model.load_state_dict(best_state_dict_reward)
                 print(
                     f"  Loaded best reward model state dict (Val Loss: {best_val_loss_reward:.4f})"
                 )
                 final_validation_loss_reward = best_val_loss_reward
-            else:
-                print(
-                    f"  No improvement in reward validation loss, using final model state."
-                )
-                final_validation_loss_reward = (
-                    current_val_loss_reward  # Use last computed
-                )
+            
 
             # Final validation for R2 and accuracy flag using loaded/final models
             dynamic_model.eval()
@@ -978,13 +969,9 @@ if __name__ == "__main__":
             else:
                 validation_r2_score = np.nan
             # Update accuracy flag based on BEST recorded state validation loss
-            model_is_accurate = (
-                final_validation_loss_state < args.model_state_accuracy_threshold
-            )
-            validation_loss_state = final_validation_loss_state
-            validation_loss_reward = (
-                final_validation_loss_reward  # Log best/final losses
-            )
+            
+            model_is_accurate = validation_loss_state < args.model_state_accuracy_threshold
+
             writer.add_scalar(
                 "losses/dynamics_model_validation_loss_state",
                 validation_loss_state,

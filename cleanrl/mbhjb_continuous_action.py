@@ -649,7 +649,8 @@ if __name__ == "__main__":
                 if dones_cpu[i]:
                     is_truncated = infos[i].get("TimeLimit.truncated", False)
                     if is_truncated and "terminal_observation" in infos[i]:
-                        original_next_obs_np[i] = infos[i]["terminal_observation"] #infos[i]["terminal_observation"] is normalized? ai!
+                        # Unnormalize the terminal observation before storing it as raw data
+                        original_next_obs_np[i] = norm_envs.unnormalize_obs(infos[i]["terminal_observation"])
                     else:  # True termination or missing terminal_obs
                         original_next_obs_np[i] = norm_envs.unnormalize_obs(
                             next_obs_norm_cpu[i]

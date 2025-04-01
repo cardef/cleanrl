@@ -1026,6 +1026,19 @@ if __name__ == "__main__":
                 val_loss_state = val_masked_state_mse.sum() / val_mask_sum
                 print(f"DEBUG: Final Val - Calculated val_loss_state: {val_loss_state.item():.4f}") # Print the final value
 
+                # --- Calculate and print per-variable state MSE ---
+                if val_mask_sum > 0:
+                    # Calculate MSE per dimension, considering the mask
+                    per_variable_mse = (val_masked_state_mse.sum(dim=0) / val_mask.sum(dim=0).clamp(min=1.0)).cpu().numpy()
+                    print("DEBUG: Final Val - Per-Variable State MSE:")
+                    for i, mse_val in enumerate(per_variable_mse):
+                        print(f"  State Var {i}: {mse_val:.4f}")
+                        writer.add_scalar(f"losses/dynamics_model_validation_loss_state_var_{i}", mse_val, global_step)
+                else:
+                    print("DEBUG: Final Val - Skipping per-variable MSE calculation (mask sum is zero)")
+                # --- End per-variable state MSE ---
+
+
                 val_loss_reward = nn.functional.mse_loss(reward_norm_pred_val, reward_val_batch_target) # Final reward loss
 
                 # 7. Check final loss values

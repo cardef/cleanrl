@@ -999,10 +999,21 @@ if __name__ == "__main__":
             val_loss_state = torch.tensor(float('nan')).to(device) # Default to NaN
             val_loss_reward = torch.tensor(float('nan')).to(device) # Default to NaN
             try:
+                # --- Start Inspecting val_loss_state ---
+                print(f"DEBUG: Final Val - Pred State Shape: {next_obs_norm_pred_val.shape}, Target State Shape: {next_obs_val_batch_target.shape}, Dones Shape: {dones_val_batch.shape}")
+                print(f"DEBUG: Final Val - Pred State Stats: Min={next_obs_norm_pred_val.min():.4f}, Max={next_obs_norm_pred_val.max():.4f}, Mean={next_obs_norm_pred_val.mean():.4f}, NaN Count={torch.isnan(next_obs_norm_pred_val).sum()}")
+                print(f"DEBUG: Final Val - Target State Stats: Min={next_obs_val_batch_target.min():.4f}, Max={next_obs_val_batch_target.max():.4f}, Mean={next_obs_val_batch_target.mean():.4f}, NaN Count={torch.isnan(next_obs_val_batch_target).sum()}")
+                print(f"DEBUG: Final Val - Dones Stats: Min={dones_val_batch.min():.4f}, Max={dones_val_batch.max():.4f}, Mean={dones_val_batch.mean():.4f}, NaN Count={torch.isnan(dones_val_batch).sum()}")
+
                 val_state_mse_all = nn.functional.mse_loss(next_obs_norm_pred_val, next_obs_val_batch_target, reduction='none')
+                print(f"DEBUG: Final Val - val_state_mse_all Shape: {val_state_mse_all.shape}, Stats: Min={val_state_mse_all.min():.4f}, Max={val_state_mse_all.max():.4f}, Mean={val_state_mse_all.mean():.4f}, NaN Count={torch.isnan(val_state_mse_all).sum()}")
+
                 val_mask = 1.0 - dones_val_batch
                 if len(val_state_mse_all.shape) > len(val_mask.shape): val_mask = val_mask.view(val_mask.shape[0], *([1]*(len(val_state_mse_all.shape)-len(val_mask.shape))))
+                print(f"DEBUG: Final Val - val_mask Shape: {val_mask.shape}, Stats: Min={val_mask.min():.4f}, Max={val_mask.max():.4f}, Mean={val_mask.mean():.4f}, NaN Count={torch.isnan(val_mask).sum()}")
+
                 val_masked_state_mse = val_state_mse_all * val_mask
+                print(f"DEBUG: Final Val - val_masked_state_mse Shape: {val_masked_state_mse.shape}, Stats: Min={val_masked_state_mse.min():.4f}, Max={val_masked_state_mse.max():.4f}, Mean={val_masked_state_mse.mean():.4f}, NaN Count={torch.isnan(val_masked_state_mse).sum()}")
                 val_mask_sum = val_mask.sum().clamp(min=1.0)
                 # 6. Check intermediate loss values
                 assert not torch.isnan(val_state_mse_all).any(), "NaN detected in element-wise state mse"
@@ -1010,11 +1021,15 @@ if __name__ == "__main__":
                 assert not torch.isnan(val_masked_state_mse).any(), "NaN detected in masked state mse"
                 assert not torch.isinf(val_masked_state_mse).any(), "Inf detected in masked state mse"
                 assert not torch.isnan(val_mask_sum).any(), "NaN detected in mask sum"
+                print(f"DEBUG: Final Val - val_mask_sum: {val_mask_sum.item():.4f}")
 
                 val_loss_state = val_masked_state_mse.sum() / val_mask_sum
+                print(f"DEBUG: Final Val - Calculated val_loss_state: {val_loss_state.item():.4f}") # Print the final value
+
                 val_loss_reward = nn.functional.mse_loss(reward_norm_pred_val, reward_val_batch_target) # Final reward loss
 
                 # 7. Check final loss values
+                # --- End Inspecting val_loss_state ---
                 assert not torch.isnan(val_loss_state).any(), "NaN detected in final state loss calculation"
                 assert not torch.isinf(val_loss_state).any(), "Inf detected in final state loss calculation"
                 assert not torch.isnan(val_loss_reward).any(), "NaN detected in final reward loss calculation"

@@ -882,9 +882,7 @@ if __name__ == "__main__":
                         reward_norm_pred_val, reward_val_batch_target
                     )
                     current_val_loss_reward = val_loss_reward_tensor.item()
-                    print(
-                        f"    Epoch {model_epoch+1}/{args.model_train_epochs}: Val State Loss={current_val_loss_state:.4f}, Val Reward Loss={current_val_loss_reward:.4f}"
-                    )
+                    #print(f"    Epoch {model_epoch+1}/{args.model_train_epochs}: Val State Loss={current_val_loss_state:.4f}, Val Reward Loss={current_val_loss_reward:.4f}")
                     # Check Dynamics Improvement
                     if current_val_loss_state < best_val_loss_state:
                         best_val_loss_state = current_val_loss_state
@@ -892,9 +890,9 @@ if __name__ == "__main__":
                             dynamic_model.ode_func.state_dict()
                         )
                         epochs_without_state_improvement = 0
-                        print(
+                        """ print(
                             f"      New best dynamics validation loss: {best_val_loss_state:.4f}"
-                        )
+                        ) """
                     else:
                         epochs_without_state_improvement += args.model_validation_freq
                     # Check Reward Improvement
@@ -904,9 +902,9 @@ if __name__ == "__main__":
                             reward_model.state_dict()
                         )
                         epochs_without_reward_improvement = 0
-                        print(
+                        """ print(
                             f"      New best reward validation loss: {best_val_loss_reward:.4f}"
-                        )
+                        ) """
                     else:
                         epochs_without_reward_improvement += args.model_validation_freq
                     dynamic_model.train()

@@ -1022,13 +1022,18 @@ if __name__ == "__main__":
                 assert not torch.isnan(val_masked_state_mse).any(), "NaN detected in masked state mse"
                 assert not torch.isinf(val_masked_state_mse).any(), "Inf detected in masked state mse"
                 assert not torch.isnan(val_mask_sum).any(), "NaN detected in mask sum"
-                print(f"DEBUG: Final Val - val_mask_sum: {val_mask_sum.item():.4f}")
+                print(f"DEBUG: Final Val - val_mask_sum (num valid samples): {val_mask_sum.item():.4f}") # Renamed for clarity
 
-                val_loss_state = val_masked_state_mse.sum() / val_mask_sum
-                print(f"DEBUG: Final Val - Calculated val_loss_state: {val_loss_state.item():.4f}") # Print the final value
+                # <<< Fix 2: Correct MSE calculation in final validation >>>
+                num_state_dims = next_obs_val_batch_target.shape[1] # Get number of state features
+                # num_valid_samples is already calculated as val_mask_sum
+                num_valid_elements = val_mask_sum * num_state_dims # Total elements to average over
+                # Correct MSE = Sum of masked squared errors / Number of valid elements contributing to the sum
+                val_loss_state = val_masked_state_mse.sum() / num_valid_elements.clamp(min=1.0)
+                print(f"DEBUG: Final Val - Calculated val_loss_state (Corrected): {val_loss_state.item():.4f}") # Updated print message
 
                 # --- Calculate and print per-variable state MSE ---
-                if val_mask_sum > 0:
+                if val_mask_sum > 0: # Keep using val_mask_sum (num samples) for the condition here
                     # Calculate MSE per dimension, considering the mask
                     per_variable_mse = (val_masked_state_mse.sum(dim=0) / val_mask.sum(dim=0).clamp(min=1.0)).cpu().numpy()
                     print("DEBUG: Final Val - Per-Variable State MSE:")

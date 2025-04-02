@@ -993,6 +993,17 @@ if __name__ == "__main__":
                     assert not torch.isinf(next_obs_norm_pred_val).any(), "Inf detected AFTER dynamics model prediction"
                     assert not torch.isnan(reward_norm_pred_val).any(), "NaN detected AFTER reward model prediction"
                     assert not torch.isinf(reward_norm_pred_val).any(), "Inf detected AFTER reward model prediction"
+
+                    # --- Debug: Print random target vs prediction ---
+                    if next_obs_val_batch_target.shape[0] > 0:
+                        random_idx = random.randint(0, next_obs_val_batch_target.shape[0] - 1)
+                        target_obs = next_obs_val_batch_target[random_idx].cpu().numpy()
+                        pred_obs = next_obs_norm_pred_val[random_idx].cpu().numpy()
+                        print(f"DEBUG: Final Val - Random Sample (idx={random_idx}):")
+                        print(f"  Target Next Obs: {np.array2string(target_obs, precision=4, suppress_small=True)}")
+                        print(f"  Pred   Next Obs: {np.array2string(pred_obs, precision=4, suppress_small=True)}")
+                    # --- End Debug Print ---
+
                 except Exception as e:
                     print(f"DEBUG: Error during final validation model prediction: {e}")
 

@@ -218,7 +218,7 @@ class DynamicModel(nn.Module):
 
     def forward(self, initial_obs_norm, actions_norm):
         batch_size = initial_obs_norm.shape[0]
-        dt0 = torch.full((batch_size,), self.dt, device=self.device)
+        dt0 = torch.full((batch_size,), self.dt/5, device=self.device)
         t_span_tensor = torch.tensor([0.0, self.dt], device=self.device)
         t_eval = t_span_tensor.unsqueeze(0).repeat(batch_size, 1)
         problem = to.InitialValueProblem(

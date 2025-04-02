@@ -873,9 +873,12 @@ if __name__ == "__main__":
                             ),
                         )
                     val_masked_state_mse = val_state_mse_all * val_mask
-                    val_loss_state_tensor = (
-                        val_masked_state_mse.sum() / val_mask.sum().clamp(min=1.0)
-                    )
+                    # <<< Fix 2: Correct MSE calculation in final validation >>>
+                    num_state_dims = next_obs_val_batch_target.shape[1] # Get number of state features
+                    num_valid_samples = val_mask.sum().clamp(min=1.0) # Count non-terminal samples
+                    num_valid_elements = num_valid_samples * num_state_dims # Total elements to average over
+                    # Correct MSE = Sum of masked squared errors / Number of valid elements contributing to the sum
+                    val_loss_state_tensor = val_masked_state_mse.sum() / num_valid_elements.clamp(min=1.0)
                     current_val_loss_state = val_loss_state_tensor.item()
                     # Calculate Reward Val Loss
                     val_loss_reward_tensor = nn.functional.mse_loss(

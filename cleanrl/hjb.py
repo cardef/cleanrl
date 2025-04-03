@@ -376,10 +376,8 @@ if __name__ == "__main__":
     norm_envs = VecNormalize(
         envs,
         gamma=args.gamma,
-        norm_obs=True,
-        norm_reward=True,
-        clip_obs=10.0,
-        clip_reward=10.0,
+        norm_obs=False,
+        norm_reward=False,
     )
     print("VecNormalize enabled (Obs=True, Reward=True).")  # Keep reward norm
     try:

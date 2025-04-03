@@ -315,6 +315,108 @@ def validate_model(
     return val_loss, val_metrics
 
 
+# --- Helper Functions for HJB Calculation (Module Level) ---
+def calculate_a_star_quad_approx(
+    dVdx_norm,
+    f2_transpose,
+    c1,
+    c2_reg,
+    action_space_low_t,
+    action_space_high_t,
+):
+    """
+    Calculates the optimal action a* using a quadratic approximation of the Hamiltonian.
+    a* = - c2_reg^{-1} * (c1 + f2^T * dVdx^T)
+    Clamps the result to the action space bounds.
+
+    Args:
+        dVdx_norm: Gradient of the value function w.r.t. state (batch, obs_dim).
+        f2_transpose: Transpose of the control influence matrix (batch, action_dim, obs_dim).
+        c1: Negative gradient of the reward w.r.t. action at a=0 (batch, action_dim).
+        c2_reg: Regularized negative Hessian of the reward w.r.t. action at a=0 (batch, action_dim, action_dim).
+        action_space_low_t: Lower bounds of the action space (action_dim).
+        action_space_high_t: Upper bounds of the action space (action_dim).
+
+    Returns:
+        The calculated optimal action a* (batch, action_dim), clamped to bounds, or None if calculation fails.
+    """
+    if f2_transpose is None or c1 is None or c2_reg is None:
+        print("WARN: calculate_a_star called with None inputs.")
+        return None
+
+    # Ensure consistent device and dtype
+    device = dVdx_norm.device
+    f2_transpose = f2_transpose.to(device)
+    c1 = c1.to(device)
+    c2_reg = c2_reg.to(device)
+    action_space_low_t = action_space_low_t.to(device)
+    action_space_high_t = action_space_high_t.to(device)
+
+    dVdx_col = dVdx_norm.unsqueeze(-1) # [batch, obs_dim, 1]
+    try:
+        f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1) # [batch, action_dim]
+        term1 = c1 + f2T_dVdx # [batch, action_dim]
+    except Exception as e:
+        print(f"ERROR: Dimension mismatch in f2T_dVdx calculation: {e}")
+        print(f"  f2_transpose shape: {f2_transpose.shape}")
+        print(f"  dVdx_col shape: {dVdx_col.shape}")
+        print(f"  c1 shape: {c1.shape}")
+        return None
+
+    a_star_unclamped = None
+    try:
+        # Use torch.linalg.solve: solves ax=b for x -> solve(a, b)
+        # Here: c2_reg * a* = -term1
+        a_star_unclamped = torch.linalg.solve(
+            c2_reg, -term1.unsqueeze(-1) # b needs shape [batch, action_dim, 1]
+        ).squeeze(-1) # Result shape [batch, action_dim]
+    except torch.linalg.LinAlgError as e: # More specific exception
+        print(
+            f"WARN: Hessian inversion failed during a* calc: {e}. Using pseudo-inverse."
+        )
+        try:
+            c2_reg_pinv = torch.linalg.pinv(c2_reg) # [batch, action_dim, action_dim]
+            a_star_unclamped = torch.bmm(
+                c2_reg_pinv, -term1.unsqueeze(-1) # [batch, action_dim, 1]
+            ).squeeze(-1) # Result shape [batch, action_dim]
+        except Exception as e2:
+            print(
+                f"ERROR: Hessian pseudo-inverse also failed: {e2}. Cannot compute a*."
+            )
+            return None
+    except Exception as e_other: # Catch other potential errors
+         print(f"ERROR: Unexpected error during a* solve: {e_other}")
+         return None
+
+
+    if a_star_unclamped is not None:
+        # Clamp the action to the environment's action space bounds
+        a_star_clamped = torch.clamp(a_star_unclamped, action_space_low_t, action_space_high_t)
+        # Debug: Check for NaNs
+        if torch.isnan(a_star_clamped).any():
+            print("WARN: NaN detected in calculated a_star_clamped.")
+            # Optionally return None or a default action like zeros
+            # return torch.zeros_like(a_star_clamped)
+            return None
+        return a_star_clamped
+    else:
+        # This case should ideally not be reached if pinv fallback works
+        print("ERROR: a_star_unclamped is None after solve attempts.")
+        return None
+
+
+def get_f1(s_norm_batch, dynamic_model_ode_func, action_dim):
+    """
+    Computes the drift term f1(s) by evaluating the ODE func with zero action.
+    Requires the dynamic model's ode_func and action_dim to be passed explicitly.
+    """
+    zero_actions = torch.zeros(s_norm_batch.shape[0], action_dim, device=s_norm_batch.device)
+    # Evaluate the ODE function at t=0 with zero action
+    with torch.no_grad(): # f1 calculation should not require gradients itself
+        f1 = dynamic_model_ode_func(torch.tensor(0.0), s_norm_batch, zero_actions)
+    return f1
+
+
 # --- Main Execution ---
 if __name__ == "__main__":
     if not TORCHODE_AVAILABLE:
@@ -513,60 +615,6 @@ if __name__ == "__main__":
     elif args.use_hjb_loss:
         print("WARNING: HJB requested but torch.func unavailable. HJB disabled.")
         args.use_hjb_loss = False
-
-    # --- Helper Function for HJB Calculation ---
-    def calculate_a_star_quad_approx(
-        dVdx_norm,
-        f2_transpose,
-        c1,
-        c2_reg,
-        action_space_low_t,
-        action_space_high_t,
-    ):
-        # a* = - c2_reg^{-1} * (c1 + f2^T * dVdx^T)
-        # Clamps the result to the action space bounds.
-        if f2_transpose is None or c1 is None or c2_reg is None:
-            return None
-        dVdx_col = dVdx_norm.unsqueeze(-1)
-        f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1)
-        term1 = c1 + f2T_dVdx
-        a_star_unclamped = None
-        try:
-            # Use torch.linalg.solve
-            a_star_unclamped = torch.linalg.solve(
-                c2_reg, -term1.unsqueeze(-1)
-            ).squeeze(-1)
-        except torch._C._LinAlgError as e:
-            print(
-                f"WARN: Hessian inversion failed during a* calc: {e}. Using pseudo-inverse."
-            )
-            try:
-                c2_reg_pinv = torch.linalg.pinv(c2_reg)
-                a_star_unclamped = torch.bmm(
-                    c2_reg_pinv, -term1.unsqueeze(-1)
-                ).squeeze(-1)
-            except Exception as e2:
-                print(
-                    f"ERROR: Hessian pseudo-inverse also failed: {e2}. Cannot compute a*."
-                )
-                return None
-
-        if a_star_unclamped is not None:
-            # Clamp the action to the environment's action space bounds
-            a_star_clamped = torch.max(
-                torch.min(a_star_unclamped, action_space_high_t), action_space_low_t
-            )
-            return a_star_clamped
-        else:
-            return None
-
-    def get_f1(s_norm_batch):
-        """Computes the drift term f1(s) by evaluating the ODE func with zero action."""
-        zero_actions = torch.zeros(s_norm_batch.shape[0], action_dim, device=s_norm_batch.device)
-        # Evaluate the ODE function at t=0 with zero action
-        with torch.no_grad(): # f1 calculation should not require gradients itself
-            f1 = dynamic_model.ode_func(torch.tensor(0.0), s_norm_batch, zero_actions)
-        return f1
 
     # ========================================================================
     # <<< Main Training Loop >>>
@@ -1056,7 +1104,8 @@ if __name__ == "__main__":
                     # Calculate dV/dx, f1, f2, c1, c2, a*
                     try:
                         dVdx_non_term = vmap(compute_value_grad_func)(obs_non_term)
-                        f1_non_term = get_f1(obs_non_term)  # f1(s_norm)
+                        # Pass dynamic_model.ode_func and action_dim to get_f1
+                        f1_non_term = get_f1(obs_non_term, dynamic_model.ode_func, action_dim)  # f1(s_norm)
                         f2_T_non_term = compute_f_jac_func(obs_non_term)  # f2(s_norm)^T
 
                         zero_actions_non_term = torch.zeros_like(

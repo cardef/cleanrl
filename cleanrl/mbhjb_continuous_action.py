@@ -84,7 +84,7 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    learning_rate: float = 1e-3  # Policy LR
+    learning_rate: float = 3e-4  # Policy LR
     """the learning rate of the policy optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
@@ -122,20 +122,20 @@ class Args:
     model_train_batch_size: int = 256
     model_train_freq: int = 250
     model_train_epochs: int = 1000  # Max epochs per training phase
-    model_rollout_freq: int = 1000
+    model_rollout_freq: int = 2048*2
     model_rollout_length: int = 5
     model_rollout_batch_size: int = 4096  # Target size
     num_model_rollout_starts: int = field(init=False)
-    use_model_for_updates: bool = True
+    use_model_for_updates: bool = False
 
     # Model Validation Args
     model_validation_batch_size: int = 1024
-    model_state_accuracy_threshold: float = 1.5
+    model_state_accuracy_threshold: float = 0.02
     model_early_stopping_patience: int = 50
     model_validation_freq: int = 1
 
     # HJB Residual Args
-    hjb_coef: float = 0.5
+    hjb_coef: float = 0.1
     use_hjb_loss: bool = True
 
     # Environment dt
@@ -186,11 +186,13 @@ class ODEFunc(nn.Module):
         super().__init__()
         hidden_size = 256
         self.net = nn.Sequential(
-            layer_init(nn.Linear(obs_dim + action_dim, hidden_size)),
-            nn.SiLU(),
-            layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.SiLU(),
-            layer_init(nn.Linear(hidden_size, obs_dim)),
+            nn.Linear(obs_dim + action_dim, hidden_size),
+            nn.Softplus(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Softplus(),
+            nn.Linear(hidden_size, obs_dim),
         )
         print(
             f"Initialized ODEFunc: Input {obs_dim + action_dim}, Output {obs_dim} (state derivative)"
@@ -209,7 +211,7 @@ class DynamicModel(nn.Module):
         self.dt = dt
         self.device = device
         self.term = to.ODETerm(self.ode_func, with_args=True)
-        self.step_method = to.Tsit5(term=self.term)
+        self.step_method = to.Euler(term=self.term)
         self.step_size_controller = to.FixedStepController()
         self.adjoint = to.AutoDiffAdjoint(
             step_method=self.step_method, step_size_controller=self.step_size_controller
@@ -490,8 +492,8 @@ if __name__ == "__main__":
         device
     )
     reward_model = RewardModel(obs_shape[0], action_shape[0]).to(device)
-    policy_optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-    dynamics_optimizer = optim.Adam(
+    policy_optimizer = optim.AdamW(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    dynamics_optimizer = optim.AdamW(
         dynamic_model.ode_func.parameters(), lr=args.dynamics_learning_rate
     )
     reward_optimizer = optim.Adam(
@@ -1324,7 +1326,7 @@ if __name__ == "__main__":
                     entropy_loss = entropy.mean()
                     # HJB Calculation (Masked)
                     L_HJB = torch.tensor(0.0).to(device)
-                    if args.use_hjb_loss and compute_value_grad_func is not None:
+                    if args.use_hjb_loss and model_is_accurate and compute_value_grad_func is not None:
                         try:
                             action_from_batch = mb_actions
                             dVdx_norm = vmap(compute_value_grad_func)(mb_obs)

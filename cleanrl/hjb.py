@@ -511,29 +511,50 @@ if __name__ == "__main__":
         args.use_hjb_loss = False
 
     # --- Helper Function for HJB Calculation ---
-    def calculate_a_star_quad_approx(dVdx_norm, f2_transpose, c1, c2_reg):
+    def calculate_a_star_quad_approx(
+        dVdx_norm,
+        f2_transpose,
+        c1,
+        c2_reg,
+        action_space_low_t,
+        action_space_high_t,
+    ):
         # a* = - c2_reg^{-1} * (c1 + f2^T * dVdx^T)
+        # Clamps the result to the action space bounds.
         if f2_transpose is None or c1 is None or c2_reg is None:
             return None
         dVdx_col = dVdx_norm.unsqueeze(-1)
         f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1)
         term1 = c1 + f2T_dVdx
+        a_star_unclamped = None
         try:
             # Use torch.linalg.solve
-            a_star = torch.linalg.solve(c2_reg, -term1.unsqueeze(-1)).squeeze(-1) #clamp a_start into actions space ai!
+            a_star_unclamped = torch.linalg.solve(
+                c2_reg, -term1.unsqueeze(-1)
+            ).squeeze(-1)
         except torch._C._LinAlgError as e:
             print(
                 f"WARN: Hessian inversion failed during a* calc: {e}. Using pseudo-inverse."
             )
             try:
                 c2_reg_pinv = torch.linalg.pinv(c2_reg)
-                a_star = torch.bmm(c2_reg_pinv, -term1.unsqueeze(-1)).squeeze(-1)
+                a_star_unclamped = torch.bmm(
+                    c2_reg_pinv, -term1.unsqueeze(-1)
+                ).squeeze(-1)
             except Exception as e2:
                 print(
                     f"ERROR: Hessian pseudo-inverse also failed: {e2}. Cannot compute a*."
                 )
                 return None
-        return a_star
+
+        if a_star_unclamped is not None:
+            # Clamp the action to the environment's action space bounds
+            a_star_clamped = torch.max(
+                torch.min(a_star_unclamped, action_space_high_t), action_space_low_t
+            )
+            return a_star_clamped
+        else:
+            return None
 
     def get_f1(s_norm_batch):
         """Computes the drift term f1(s) by evaluating the ODE func with zero action."""
@@ -581,15 +602,26 @@ if __name__ == "__main__":
                         c2_reg = (
                             c2 + torch.eye(action_dim, device=device) * args.hessian_reg
                         )
-                        actions_star_unclamped = calculate_a_star_quad_approx(
-                            dVdx, f2_T, c1, c2_reg
+                        # Calculate a* (now clamped inside the function)
+                        actions_star = calculate_a_star_quad_approx(
+                            dVdx,
+                            f2_T,
+                            c1,
+                            c2_reg,
+                            action_space_low_t,
+                            action_space_high_t,
                         )
-                        if actions_star_unclamped is not None:
-                            actions_star = (
-                                actions_star_unclamped  # Use unclamped for noise
+                        if actions_star is None:
+                            # Fallback if a* calculation failed
+                            actions_star = torch.zeros(args.num_envs, action_dim).to(
+                                device
                             )
+                            print("WARN: a* calculation returned None, using zeros.")
+
                     except Exception as e:
                         print(f"WARN: a* calc failed in action selection: {e}")
+                        # Fallback if exception during calculation
+                        actions_star = torch.zeros(args.num_envs, action_dim).to(device)
 
                 noise = torch.normal(
                     0,
@@ -1041,12 +1073,19 @@ if __name__ == "__main__":
                             and c1 is not None
                             and c2_reg is not None
                         ):
+                            # Calculate a* (now clamped inside the function)
                             a_star_non_term = calculate_a_star_quad_approx(
-                                dVdx_non_term, f2_T_non_term, c1, c2_reg
-                            )  # Unclamped a*
+                                dVdx_non_term,
+                                f2_T_non_term,
+                                c1,
+                                c2_reg,
+                                action_space_low_t,
+                                action_space_high_t,
+                            )
 
                             if a_star_non_term is not None:
                                 # Calculate H(a*) = R(s, a*) + <dVdx, f(s, a*)> using learned models
+                                # NOTE: We use the *clamped* a_star here for H calculation
                                 with torch.no_grad():
                                     # Need f(s, a*) = f1 + f2 * a*
                                     f_star_non_term = f1_non_term + torch.bmm(
@@ -1202,9 +1241,13 @@ if __name__ == "__main__":
                     eval_reward_model_wrapper, argnums=1
                 )
 
-                # <<< Fix: Pass state batch to eval helper >>>
+                # <<< Updated eval helper to accept bounds and clamp >>>
                 def eval_calculate_a_star_quad_approx(
-                    s_norm_batch, dVdx_norm, f2_transpose
+                    s_norm_batch,
+                    dVdx_norm,
+                    f2_transpose,
+                    action_space_low_t,
+                    action_space_high_t,
                 ):
                     if f2_transpose is None:
                         return None
@@ -1231,15 +1274,29 @@ if __name__ == "__main__":
                     dVdx_col = dVdx_norm.unsqueeze(-1)
                     f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1)
                     term1 = c1 + f2T_dVdx
+                    a_star_unclamped = None
                     try:
-                        a_star = torch.linalg.solve(
+                        a_star_unclamped = torch.linalg.solve(
                             c2_reg, -term1.unsqueeze(-1)
                         ).squeeze(-1)
                     except Exception:
-                        a_star = torch.bmm(
-                            torch.linalg.pinv(c2_reg), -term1.unsqueeze(-1)
-                        ).squeeze(-1)
-                    return a_star  # Return unclamped
+                        try:
+                            a_star_unclamped = torch.bmm(
+                                torch.linalg.pinv(c2_reg), -term1.unsqueeze(-1)
+                            ).squeeze(-1)
+                        except Exception as e_pinv:
+                            print(f"WARN: Eval a* pinv failed: {e_pinv}")
+                            return None
+
+                    if a_star_unclamped is not None:
+                        # Clamp the action to the environment's action space bounds
+                        a_star_clamped = torch.max(
+                            torch.min(a_star_unclamped, action_space_high_t),
+                            action_space_low_t,
+                        )
+                        return a_star_clamped
+                    else:
+                        return None
 
             except Exception as e:
                 print(f"Eval grad/jac/hess func setup failed: {e}")
@@ -1271,22 +1328,19 @@ if __name__ == "__main__":
                             dVdx = vmap(eval_compute_value_grad_func)(obs_tensor)
                             f2_T = eval_get_f2_transpose(obs_tensor)
                             if f2_T is not None:
-                                # <<< Fix: Pass obs_tensor to eval helper >>>
-                                action_star_unclamped = (
-                                    eval_calculate_a_star_quad_approx(
-                                        obs_tensor, dVdx, f2_T
-                                    )
+                                # Calculate a* (now clamped inside the helper)
+                                action_star = eval_calculate_a_star_quad_approx(
+                                    obs_tensor,
+                                    dVdx,
+                                    f2_T,
+                                    action_space_low_t,
+                                    action_space_high_t,
                                 )
-                                if action_star_unclamped is not None:
-                                    # <<< Fix: Clamp final action for eval >>>
-                                    action_star_clamped = torch.max(
-                                        torch.min(
-                                            action_star_unclamped, action_space_high_t
-                                        ),
-                                        action_space_low_t,
-                                    )
-                                    action = action_star_clamped.cpu().numpy()
+                                if action_star is not None:
+                                    action = action_star.cpu().numpy()
                                 else:
+                                    # Fallback if a* calculation failed
+                                    print("WARN: Eval a* calculation returned None.")
                                     action = np.array(
                                         [
                                             eval_norm_envs.action_space.sample()

@@ -17,19 +17,9 @@ except ImportError:
 
 # Import the function to test from the main script
 # Assuming the script is runnable and calculate_a_star_quad_approx is accessible
-# Adjust the import path if necessary based on your project structure
-try:
-    from cleanrl.hjb import calculate_a_star_quad_approx
-except ImportError:
-    # Define a dummy function if the import fails, so tests can be collected but will fail
-    print(
-        "WARN: Could not import calculate_a_star_quad_approx from cleanrl.hjb. Tests will fail."
-    )
-
-    def calculate_a_star_quad_approx(*args, **kwargs):
-        raise ImportError(
-            "calculate_a_star_quad_approx could not be imported from cleanrl.hjb"
-        )
+# Adjust the import path if necessary based on your project structure.
+# Running pytest from the root directory should make this import work.
+from cleanrl.hjb import calculate_a_star_quad_approx
 
 
 # --- Configuration ---
@@ -242,10 +232,16 @@ def test_f_jacobian(sample_data):
     compute_f_jac_func_dummy = jacrev(f_dummy_torch_wrapper, argnums=1)
     # The output shape of jacrev might be [obs_dim, action_dim] for single inputs
     # vmap applies this over the batch, resulting in [batch, obs_dim, action_dim]
-    dfda_numerical = vmap(compute_f_jac_func_dummy)(s_torch, a_torch)
+    # Use a helper function with lambda to ensure jacrev differentiates only w.r.t 'a'
+    def compute_jac_single(s, a):
+        # Define the function of 'a' only, capturing 's'
+        func_of_a = lambda a_arg: f_dummy_torch_wrapper(s, a_arg)
+        return jacrev(func_of_a)(a) # Should return [obs_dim, action_dim]
+
+    dfda_numerical = vmap(compute_jac_single)(s_torch, a_torch) # Should be [batch, obs_dim, action_dim]
 
     # Analytical Jacobian (f2)
-    f2_analytical_val = f2_dummy_analytical(s_np)
+    f2_analytical_val = f2_dummy_analytical(s_np) # Expect [batch, obs_dim, action_dim]
 
     assert np.allclose(
         dfda_numerical.cpu().numpy(), f2_analytical_val, atol=ATOL

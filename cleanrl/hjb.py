@@ -488,13 +488,13 @@ if __name__ == "__main__":
                     jacobian_matrix = compute_jac_f_a(
                         torch.tensor(0.0), s_batch, a_batch
                     )
-                    # Squeeze potential batch dims [0] and inner batch dim [1] from jacrev
-                    # to ensure a [obs_dim, action_dim] output.
-                    return jacobian_matrix.squeeze(0).squeeze(1)
+                    # Assuming jacrev returns shape [1, obs_dim, action_dim] for batch-1 inputs,
+                    # squeeze the leading batch dimension.
+                    return jacobian_matrix.squeeze(0) # Result shape: [obs_dim, action_dim]
 
 
-                f2_matrices = vmap(compute_jac_for_single_s)(s_norm_batch, zero_actions) # Should now be [batch, obs_dim, action_dim]
-                f2_transpose = torch.permute(f2_matrices, (0, 2, 1))
+                f2_matrices = vmap(compute_jac_for_single_s)(s_norm_batch, zero_actions) # Shape: [batch, obs_dim, action_dim]
+                f2_transpose = torch.permute(f2_matrices, (0, 2, 1)) # Shape: [batch, action_dim, obs_dim]
                 return f2_transpose
 
             compute_f_jac_func = get_f2_transpose

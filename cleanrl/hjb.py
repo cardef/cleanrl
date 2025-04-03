@@ -1006,14 +1006,16 @@ if __name__ == "__main__":
                         vmap(eval_compute_jac_for_single_s)(s_norm_batch), (0, 2, 1)
                     )
 
-                def eval_calculate_a_star(dVdx_norm, f2_transpose):
+                def eval_calculate_a_star(dVdx_norm, f2_transpose, action_space_low_t, action_space_high_t):
                     if f2_transpose is None:
                         return None
                     dVdx_col = dVdx_norm.unsqueeze(-1)
-                    a_star = (-1.0 / (2.0 * ctrl_cost_weight)) * torch.bmm(
+                    a_star_unclamped = (-1.0 / (2.0 * ctrl_cost_weight)) * torch.bmm(
                         f2_transpose, dVdx_col
                     ).squeeze(-1)
-                    return a_star
+                    # Clamp the optimal action to the environment's action space bounds
+                    a_star_clamped = torch.max(torch.min(a_star_unclamped, action_space_high_t), action_space_low_t)
+                    return a_star_clamped
 
             except Exception as e:
                 print(f"Eval grad/jac func failed: {e}")

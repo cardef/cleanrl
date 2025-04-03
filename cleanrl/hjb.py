@@ -1154,6 +1154,10 @@ if __name__ == "__main__":
                             )
 
                             if a_star_non_term is not None:
+                                # Debug Print: Show first few a* values (Now prints every time)
+                                num_to_show = min(3, len(a_star_non_term))
+                                print(f"  Debug GStep {global_step} - Calculated a*[:{num_to_show}]:\n{a_star_non_term[:num_to_show].detach().cpu().numpy()}")
+
                                 # Calculate H(a*) = R(s, a*) + <dVdx, f(s, a*)> using learned models
                                 # NOTE: We use the *clamped* a_star here for H calculation
 

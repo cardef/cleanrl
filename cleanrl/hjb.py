@@ -1192,13 +1192,13 @@ if __name__ == "__main__":
                                 hjb_residual = hamiltonian_star - rho * v_non_term
                                 hjb_loss_non_term = 0.5 * (hjb_residual**2).mean()
                                 hjb_calculation_successful = True # Mark as successful
-                            else:
-                                print(
-                                    f"WARN GStep {global_step}: HJB skipped due to a* calculation failure."
-                                )
-                        else:
+                        else: # Corrected indentation
                             print(
-                                f"WARN GStep {global_step}: HJB skipped due to f2/c1/c2 calculation failure."
+                                f"WARN GStep {global_step}: HJB skipped due to a* calculation failure."
+                            )
+                    else:
+                        print(
+                            f"WARN GStep {global_step}: HJB skipped due to f2/c1/c2 calculation failure."
                             )
                     # No except block here, errors will propagate
 

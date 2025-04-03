@@ -200,15 +200,8 @@ class DynamicModel(nn.Module):  # (Same)
             y0=initial_obs_norm.float(),
             t_eval=t_eval,
         )
-        t_eval_actual, sol_ys = to.odeint(
-            self.ode_func,
-            initial_obs_norm.float(),
-            t_eval[0],
-            solver=self.step_method,
-            args=(actions_norm.float(),),
-            dt0=dt0[0],
-        )
-        final_state_pred_norm = sol_ys[1]
+        sol = self.adjoint.solve(problem, args=actions_norm.float(), dt0=dt0)
+        final_state_pred_norm = sol.ys[:, 1, :]
         return final_state_pred_norm
 
 
@@ -527,7 +520,7 @@ if __name__ == "__main__":
         term1 = c1 + f2T_dVdx
         try:
             # Use torch.linalg.solve
-            a_star = torch.linalg.solve(c2_reg, -term1.unsqueeze(-1)).squeeze(-1)
+            a_star = torch.linalg.solve(c2_reg, -term1.unsqueeze(-1)).squeeze(-1) #clamp a_start into actions space ai!
         except torch._C._LinAlgError as e:
             print(
                 f"WARN: Hessian inversion failed during a* calc: {e}. Using pseudo-inverse."

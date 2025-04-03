@@ -411,6 +411,9 @@ if __name__ == "__main__":
     action_space = norm_envs.action_space
     obs_dim = np.array(obs_space.shape).prod()
     action_dim = np.prod(action_space.shape)
+    action_space_low_t = torch.tensor(action_space.low, dtype=torch.float32, device=device)
+    action_space_high_t = torch.tensor(action_space.high, dtype=torch.float32, device=device)
+
 
     # --- Agent, Models, Optimizers ---
     # <<< Change: Removed Actor, RewardModel, policy_optimizer, reward_optimizer, alpha setup >>>
@@ -522,7 +525,7 @@ if __name__ == "__main__":
             print(f"ERROR computing f2 Jacobian: {e}")
             return None
 
-    def calculate_a_star(dVdx_norm, f2_transpose):
+    def calculate_a_star(dVdx_norm, f2_transpose, action_space_low_t, action_space_high_t):
         if f2_transpose is None:
             return None
         # a* = -1/(2*C) * f2^T * dVdx^T, where C = ctrl_cost_weight
@@ -531,10 +534,12 @@ if __name__ == "__main__":
         dVdx_col = dVdx_norm.unsqueeze(-1)
         # Result = -1/(2C) * [batch, action_dim, obs_dim] @ [batch, obs_dim, 1] -> [batch, action_dim, 1]
         # Use the inferred ctrl_cost_weight
-        a_star = (-1.0 / (2.0 * ctrl_cost_weight)) * torch.bmm(
+        a_star_unclamped = (-1.0 / (2.0 * ctrl_cost_weight)) * torch.bmm(
             f2_transpose, dVdx_col
         ).squeeze(-1)
-        return a_star #clamp a_star to action space bounds ai!
+        # Clamp the optimal action to the environment's action space bounds
+        a_star_clamped = torch.max(torch.min(a_star_unclamped, action_space_high_t), action_space_low_t)
+        return a_star_clamped
 
     # ========================================================================
     # <<< Main Training Loop >>>
@@ -561,7 +566,7 @@ if __name__ == "__main__":
                         dVdx = vmap(compute_value_grad_func)(obs_tensor)
                         f2_T = get_f2_transpose(obs_tensor)
                         if f2_T is not None:
-                            actions_star_calc = calculate_a_star(dVdx, f2_T)
+                            actions_star_calc = calculate_a_star(dVdx, f2_T, action_space_low_t, action_space_high_t)
                             if actions_star_calc is not None:
                                 actions_star = actions_star_calc
                         # else: print("WARN: f2 failed in action selection") # Avoid spamming logs
@@ -870,8 +875,10 @@ if __name__ == "__main__":
                         f1_non_term = get_f1(obs_non_term)
                         f2_T_non_term = get_f2_transpose(obs_non_term)
                         if f2_T_non_term is not None:
+                            # a_star calculation for HJB doesn't strictly need clamping,
+                            # but we pass bounds for consistency if needed later.
                             a_star_non_term = calculate_a_star(
-                                dVdx_non_term, f2_T_non_term
+                                dVdx_non_term, f2_T_non_term, action_space_low_t, action_space_high_t
                             )
                             # Calculate HJB residual: ( (-r_buffer - C*||a_buffer||^2) + <dV/dx, f1> - C*||a*||^2 ) - rho*V
                             # Note: r_buffer is normalized reward, C*||a||^2 is quadratic cost in raw action space? Needs consistent normalization.

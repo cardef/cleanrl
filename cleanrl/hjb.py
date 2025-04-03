@@ -200,8 +200,23 @@ class DynamicModel(nn.Module):  # (Same)
             y0=initial_obs_norm.float(),
             t_eval=t_eval,
         )
-        sol = self.adjoint.solve(problem, args=actions_norm.float(), dt0=dt0)
-        final_state_pred_norm = sol.ys[:, 1, :]
+        try:
+            sol = self.adjoint.solve(problem, args=actions_norm.float(), dt0=dt0)
+            # Check if solve was successful and returned expected shape
+            if hasattr(sol, 'ys') and sol.ys.shape[1] > 1:
+                final_state_pred_norm = sol.ys[:, 1, :]
+            else:
+                print(f"WARN: TorchODE solve did not return expected output structure. Falling back.")
+                final_state_pred_norm = initial_obs_norm # Fallback
+        except Exception as e:
+            print(f"WARN: TorchODE solve failed with error: {e}. Falling back to initial state.")
+            final_state_pred_norm = initial_obs_norm # Fallback
+
+        # Check for NaNs/Infs in the result
+        if not torch.isfinite(final_state_pred_norm).all():
+            print("WARN: NaNs or Infs detected in dynamic model prediction. Falling back to initial state.")
+            final_state_pred_norm = initial_obs_norm # Fallback
+
         return final_state_pred_norm
 
 

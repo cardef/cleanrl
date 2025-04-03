@@ -1165,7 +1165,7 @@ if __name__ == "__main__":
                                 # reward_model.train()
 
                                 # Calculate Hamiltonian. dVdx_non_term MUST retain grads to critic.
-                                hamiltonian_star = r_star_non_term + torch.einsum(
+                                hamiltonian_star = r_star_non_term.detach() + torch.einsum(
                                     "bi,bi->b", dVdx_non_term, f_star_non_term.detach() # Detach f* only
                                 )
 

@@ -354,10 +354,11 @@ def calculate_a_star_quad_approx(
 
     dVdx_col = dVdx_norm.unsqueeze(-1) # [batch, obs_dim, 1]
     try:
+        # Calculate term H_a(0) = R_a(0) + V_s^T f2 = -c1 + dVdx^T f2
         f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1) # [batch, action_dim]
-        term1 = c1 + f2T_dVdx # [batch, action_dim]
+        term1 = -c1 + f2T_dVdx # [batch, action_dim] <--- Corrected sign for c1
     except Exception as e:
-        print(f"ERROR: Dimension mismatch in f2T_dVdx calculation: {e}")
+        print(f"ERROR: Dimension mismatch in H_a(0) calculation: {e}")
         print(f"  f2_transpose shape: {f2_transpose.shape}")
         print(f"  dVdx_col shape: {dVdx_col.shape}")
         print(f"  c1 shape: {c1.shape}")
@@ -366,9 +367,10 @@ def calculate_a_star_quad_approx(
     a_star_unclamped = None
     try:
         # Use torch.linalg.solve: solves ax=b for x -> solve(a, b)
-        # Here: c2_reg * a* = -term1
+        # Maximize H => a* = -H_aa(0)^-1 H_a(0) = -(-c2)^-1 (-c1 + f2^T dVdx) = c2^-1 * term1
+        # Here: c2_reg * a* = term1
         a_star_unclamped = torch.linalg.solve(
-            c2_reg, -term1.unsqueeze(-1) # b needs shape [batch, action_dim, 1]
+            c2_reg, term1.unsqueeze(-1) # b needs shape [batch, action_dim, 1] <--- Removed negative sign
         ).squeeze(-1) # Result shape [batch, action_dim]
     except torch.linalg.LinAlgError as e: # More specific exception
         print(
@@ -376,8 +378,9 @@ def calculate_a_star_quad_approx(
         )
         try:
             c2_reg_pinv = torch.linalg.pinv(c2_reg) # [batch, action_dim, action_dim]
+            # a* = c2_pinv * term1
             a_star_unclamped = torch.bmm(
-                c2_reg_pinv, -term1.unsqueeze(-1) # [batch, action_dim, 1]
+                c2_reg_pinv, term1.unsqueeze(-1) # [batch, action_dim, 1] <--- Removed negative sign
             ).squeeze(-1) # Result shape [batch, action_dim]
         except Exception as e2:
             print(

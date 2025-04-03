@@ -294,7 +294,7 @@ def validate_model(
     all_preds_norm = []
     all_targets_norm = []
     with torch.no_grad():
-        for batch_data in val_loader:
+        for batch_idx, batch_data in enumerate(val_loader): # Use enumerate
             obs_norm, actions, targets_norm = [d.to(device) for d in batch_data]
             preds_norm = model(obs_norm, actions)
             all_preds_norm.append(preds_norm)

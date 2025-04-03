@@ -364,11 +364,12 @@ def calculate_a_star_quad_approx(
         action_space_high_t: Upper bounds of the action space (action_dim).
 
     Returns:
-        The calculated optimal action a* (batch, action_dim), clamped to bounds, or None if calculation fails.
+        The calculated optimal action a* (batch, action_dim), clamped to bounds.
+    Raises:
+        RuntimeError: If calculation fails due to missing inputs, dimension mismatch, or numerical issues.
     """
     if f2_transpose is None or c1 is None or c2_reg is None:
-        print("WARN: calculate_a_star called with None inputs.")
-        return None
+        raise RuntimeError("calculate_a_star called with None inputs (f2_transpose, c1, or c2_reg).")
 
     # Ensure consistent device and dtype
     device = dVdx_norm.device
@@ -388,7 +389,7 @@ def calculate_a_star_quad_approx(
         print(f"  f2_transpose shape: {f2_transpose.shape}")
         print(f"  dVdx_col shape: {dVdx_col.shape}")
         print(f"  c1 shape: {c1.shape}")
-        return None
+        raise RuntimeError(f"Dimension mismatch in H_a(0) calculation: {e}")
 
     a_star_unclamped = None
     try:
@@ -412,10 +413,10 @@ def calculate_a_star_quad_approx(
             print(
                 f"ERROR: Hessian pseudo-inverse also failed: {e2}. Cannot compute a*."
             )
-            return None
+            raise RuntimeError(f"Hessian pseudo-inverse failed: {e2}")
     except Exception as e_other: # Catch other potential errors
          print(f"ERROR: Unexpected error during a* solve: {e_other}")
-         return None
+         raise RuntimeError(f"Unexpected error during a* solve: {e_other}")
 
 
     if a_star_unclamped is not None:
@@ -424,14 +425,11 @@ def calculate_a_star_quad_approx(
         # Debug: Check for NaNs
         if torch.isnan(a_star_clamped).any():
             print("WARN: NaN detected in calculated a_star_clamped.")
-            # Optionally return None or a default action like zeros
-            # return torch.zeros_like(a_star_clamped)
-            return None
+            raise RuntimeError("NaN detected in calculated a_star_clamped.")
         return a_star_clamped
     else:
         # This case should ideally not be reached if pinv fallback works
-        print("ERROR: a_star_unclamped is None after solve attempts.")
-        return None
+        raise RuntimeError("a_star_unclamped is None after solve attempts.")
 
 
 def get_f1(s_norm_batch, dynamic_model_ode_func, action_dim):
@@ -672,10 +670,10 @@ if __name__ == "__main__":
                     and compute_reward_hessian_func is not None
                     and compute_f_jac_func is not None
                 ):
-                    try:
-                        dVdx = vmap(compute_value_grad_func)(obs_tensor)
-                        f2_T = compute_f_jac_func(obs_tensor)
-                        zero_actions_obs = torch.zeros_like(actions_star)
+                    # Removed try...except block to let errors propagate
+                    dVdx = vmap(compute_value_grad_func)(obs_tensor)
+                    f2_T = compute_f_jac_func(obs_tensor)
+                    zero_actions_obs = torch.zeros_like(actions_star)
                         c1 = -vmap(compute_reward_grad_func)(
                             obs_tensor, zero_actions_obs
                         )
@@ -694,17 +692,7 @@ if __name__ == "__main__":
                             action_space_low_t,
                             action_space_high_t,
                         )
-                        if actions_star is None:
-                            # Fallback if a* calculation failed
-                            actions_star = torch.zeros(args.num_envs, action_dim).to(
-                                device
-                            )
-                            print("WARN: a* calculation returned None, using zeros.")
-
-                    except Exception as e:
-                        print(f"WARN: a* calc failed in action selection: {e}")
-                        # Fallback if exception during calculation
-                        actions_star = torch.zeros(args.num_envs, action_dim).to(device)
+                    # No fallback here, error will propagate if actions_star is None or calculation failed
 
                 noise = torch.normal(
                     0,
@@ -1134,10 +1122,10 @@ if __name__ == "__main__":
                     ]  # Raw rewards from buffer
 
                     # Calculate dV/dx, f1, f2, c1, c2, a*
-                    try:
-                        dVdx_non_term = vmap(compute_value_grad_func)(obs_non_term)
-                        # Pass dynamic_model.ode_func and action_dim to get_f1
-                        f1_non_term = get_f1(obs_non_term, dynamic_model.ode_func, action_dim)  # f1(s_norm)
+                    # Removed outer try...except block for HJB calculation
+                    dVdx_non_term = vmap(compute_value_grad_func)(obs_non_term)
+                    # Pass dynamic_model.ode_func and action_dim to get_f1
+                    f1_non_term = get_f1(obs_non_term, dynamic_model.ode_func, action_dim)  # f1(s_norm)
                         f2_T_non_term = compute_f_jac_func(obs_non_term)  # f2(s_norm)^T
 
                         zero_actions_non_term = torch.zeros_like(
@@ -1212,9 +1200,7 @@ if __name__ == "__main__":
                             print(
                                 f"WARN GStep {global_step}: HJB skipped due to f2/c1/c2 calculation failure."
                             )
-                    except Exception as e:
-                        print(f"HJB Error GStep {global_step}: {e}")
-                        # hjb_loss_non_term remains 0, hjb_calculation_successful remains False
+                    # No except block here, errors will propagate
 
                 # C. Total Critic Loss & Update
                 skip_critic_update = False
@@ -1454,10 +1440,10 @@ if __name__ == "__main__":
                         and eval_get_f2_transpose is not None
                         and eval_calculate_a_star_quad_approx is not None
                     ):
-                        try:
-                            dVdx = vmap(eval_compute_value_grad_func)(obs_tensor)
-                            f2_T = eval_get_f2_transpose(obs_tensor)
-                            if f2_T is not None:
+                        # Removed try...except block
+                        dVdx = vmap(eval_compute_value_grad_func)(obs_tensor)
+                        f2_T = eval_get_f2_transpose(obs_tensor)
+                        if f2_T is not None:
                                 # Calculate a* (now clamped inside the helper)
                                 action_star = eval_calculate_a_star_quad_approx(
                                     obs_tensor,
@@ -1484,10 +1470,11 @@ if __name__ == "__main__":
                                         for _ in range(eval_norm_envs.num_envs)
                                     ]
                                 )
-                        except Exception as e:
-                            print(f"Eval action calc failed: {e}")
-                            action = np.array(
-                                [
+                        # No except block here, errors will propagate
+                    else:
+                        # Fallback if HJB components not available for eval
+                        action = np.array(
+                            [
                                     eval_norm_envs.action_space.sample()
                                     for _ in range(eval_norm_envs.num_envs)
                                 ]

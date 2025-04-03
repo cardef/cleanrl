@@ -625,14 +625,17 @@ if __name__ == "__main__":
         for info in final_infos:
             if info and "episode" in info:
                 episode_info = info["episode"]
+                # Extract scalar values using .item() for formatting and logging
+                ep_ret = episode_info['r'].item()
+                ep_len = episode_info['l'].item()
                 print(
-                    f"GStep={global_step}, EpReturn={episode_info['r']:.2f}, EpLen={episode_info['l']}"
+                    f"GStep={global_step}, EpReturn={ep_ret:.2f}, EpLen={ep_len}"
                 )
                 writer.add_scalar(
-                    "charts/episodic_return", episode_info["r"], global_step
+                    "charts/episodic_return", ep_ret, global_step
                 )
                 writer.add_scalar(
-                    "charts/episodic_length", episode_info["l"], global_step
+                    "charts/episodic_length", ep_len, global_step
                 )
                 break
 

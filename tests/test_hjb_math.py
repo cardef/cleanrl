@@ -322,18 +322,19 @@ def test_a_star_calculation(sample_data):
     # Need batch matmul: [b, obs] @ [b, obs, act] -> [b, act]
     # f2_T_a is [b, act, obs]. dVdx_a is [b, obs].
     # We need dVdx @ f2. Let's use torch for batch matmul ease.
-    # term1_torch = c1_analytical_batch + torch.bmm(dVdx_analytical_batch.unsqueeze(1), f2_analytical_batch).squeeze(1)
-    term1_torch = c1_analytical_batch + torch.bmm(
+    # Calculate term H_a(0) = R_a(0) + V_s^T f2 = -c1 + dVdx^T f2
+    f2T_dVdx_torch = torch.bmm(
         f2_T_analytical_batch, dVdx_analytical_batch.unsqueeze(-1)
     ).squeeze(-1)
+    term1_torch = -c1_analytical_batch + f2T_dVdx_torch # Corrected analytical term
 
-    # Solve (c2_a + reg*I) a* = -term1
+    # Solve c2_reg * a* = term1
     c2_reg_a_torch = c2_analytical_batch + torch.eye(
         ACTION_DIM, device=DEVICE
     ) * hessian_reg
     # Use torch.linalg.solve for batch solve
     a_star_expected_unclamped = torch.linalg.solve(
-        c2_reg_a_torch, -term1_torch.unsqueeze(-1)
+        c2_reg_a_torch, term1_torch.unsqueeze(-1) # Corrected analytical solve
     ).squeeze(-1)
 
     # Clamp expected result
@@ -511,12 +512,16 @@ def test_a_star_singular_hessian(sample_data):
     assert a_star_calculated is not None, "a* calculation returned None for singular Hessian (pinv should have run)"
 
     # --- Optional: Calculate Expected a* Analytically using pseudo-inverse ---
-    term1_torch = c1_analytical_batch + torch.bmm(
+    # Calculate term H_a(0) = R_a(0) + V_s^T f2 = -c1 + dVdx^T f2
+    f2T_dVdx_torch = torch.bmm(
         f2_T_analytical_batch, dVdx_analytical_batch.unsqueeze(-1)
     ).squeeze(-1)
+    term1_torch = -c1_analytical_batch + f2T_dVdx_torch # Corrected analytical term
+
+    # Calculate a* = c2_pinv * term1
     c2_reg_pinv_torch = torch.linalg.pinv(c2_reg_singular)
     a_star_expected_unclamped = torch.bmm(
-        c2_reg_pinv_torch, -term1_torch.unsqueeze(-1)
+        c2_reg_pinv_torch, term1_torch.unsqueeze(-1) # Corrected analytical pinv calculation
     ).squeeze(-1)
     a_star_expected_clamped = torch.clamp(
         a_star_expected_unclamped, action_space_low_t, action_space_high_t

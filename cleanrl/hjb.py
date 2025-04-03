@@ -418,8 +418,10 @@ if __name__ == "__main__":
                          else:
                              patience_counter+=args.model_validation_freq;
                      if patience_counter>=args.model_val_patience:print(f" Early stop dyn @ ep {epoch+1}.");break
-                 if best_dyn_state_dict:dynamic_model.ode_func.load_state_dict(best_dyn_state_dict);print(f" Loaded best dyn model(VlLs:{best_val_loss:.5f})");final_validation_loss_state=best_val_loss
-             else:print(" No improve dyn valid.");dynamic_model.eval();final_val_loss,_=validate_model(dynamic_model,val_loader,device,writer,global_step,"dynamic_final_eval",True);dynamic_model.train();final_validation_loss_state=final_val_loss
+                 if best_dyn_state_dict:
+                     dynamic_model.ode_func.load_state_dict(best_dyn_state_dict);print(f" Loaded best dyn model(VlLs:{best_val_loss:.5f})");final_validation_loss_state=best_val_loss
+                 else:
+                     print(" No improve dyn valid.");dynamic_model.eval();final_val_loss,_=validate_model(dynamic_model,val_loader,device,writer,global_step,"dynamic_final_eval",True);dynamic_model.train();final_validation_loss_state=final_val_loss
              dynamic_model.eval();_,final_val_metrics=validate_model(dynamic_model,val_loader,device,writer,global_step,"dynamic_final_metrics",True);dynamic_model.train();validation_r2_score=final_val_metrics['r2'];validation_loss_state=final_validation_loss_state;dynamic_model_accurate=(validation_loss_state<=args.dynamic_train_threshold);writer.add_scalar("losses/dynamics_model_validation_loss_final",validation_loss_state,global_step);writer.add_scalar("losses/dynamics_model_R2_final",validation_r2_score,global_step);print(f"DynModel Complete.FinalVlLs:{validation_loss_state:.5f}.FinR2:{validation_r2_score:.3f}.Acc:{dynamic_model_accurate}");writer.add_scalar("charts/dynamic_model_accurate",float(dynamic_model_accurate),global_step)
 
              # --- Reward Model ---

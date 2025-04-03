@@ -976,6 +976,8 @@ if __name__ == "__main__":
         eval_compute_value_grad_func = None
         eval_get_f2_transpose = None
         eval_calculate_a_star = None
+        eval_action_space_low_t = torch.tensor(action_space.low, dtype=torch.float32, device=device)
+        eval_action_space_high_t = torch.tensor(action_space.high, dtype=torch.float32, device=device)
         if TORCH_FUNC_AVAILABLE:
             try:
 
@@ -1046,7 +1048,7 @@ if __name__ == "__main__":
                             dVdx = vmap(eval_compute_value_grad_func)(obs_tensor)
                             f2_T = eval_get_f2_transpose(obs_tensor)
                             if f2_T is not None:
-                                action_star = eval_calculate_a_star(dVdx, f2_T)
+                                action_star = eval_calculate_a_star(dVdx, f2_T, eval_action_space_low_t, eval_action_space_high_t)
                                 if action_star is not None:
                                     action = (
                                         action_star.cpu()

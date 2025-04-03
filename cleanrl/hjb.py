@@ -104,7 +104,11 @@ class ODEFunc(nn.Module): # (Same)
     def __init__(self, obs_dim, action_dim): super().__init__(); hidden_size=256; self.net=nn.Sequential(layer_init(nn.Linear(obs_dim+action_dim,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,obs_dim))); print(f"ODEFunc: In={obs_dim+action_dim}, Out={obs_dim}")
     def forward(self, t, x_norm, a): return self.net(torch.cat([x_norm.float(), a.float()], dim=-1))
 class DynamicModel(nn.Module): # (Same)
-    def __init__(self, obs_dim, action_dim, dt: float, device: torch.device): super().__init__(); self.ode_func = ODEFunc(obs_dim, action_dim); self.dt = dt; self.device = device; if not TORCHODE_AVAILABLE: raise ImportError("torchode not found."); self.term=to.ODETerm(self.ode_func,with_args=True); self.step_method=to.Euler(term=self.term); self.step_size_controller=to.FixedStepController(); self.adjoint=to.AutoDiffAdjoint(step_method=self.step_method, step_size_controller=self.step_size_controller); print(f"DynamicModel: TorchODE (Solver: Euler, dt={self.dt})")
+    def __init__(self, obs_dim, action_dim, dt: float, device: torch.device):
+        super().__init__(); self.ode_func = ODEFunc(obs_dim, action_dim); self.dt = dt; self.device = device;
+        if not TORCHODE_AVAILABLE: raise ImportError("torchode not found.");
+        self.term=to.ODETerm(self.ode_func,with_args=True); self.step_method=to.Euler(term=self.term); self.step_size_controller=to.FixedStepController(); self.adjoint=to.AutoDiffAdjoint(step_method=self.step_method, step_size_controller=self.step_size_controller);
+        print(f"DynamicModel: TorchODE (Solver: Euler, dt={self.dt})")
     def forward(self, initial_obs_norm, actions_norm): batch_size=initial_obs_norm.shape[0]; dt0=torch.full((batch_size,),self.dt/5,device=self.device); t_span_tensor=torch.tensor([0.0,self.dt],device=self.device); t_eval=t_span_tensor.unsqueeze(0).repeat(batch_size,1); problem=to.InitialValueProblem(y0=initial_obs_norm.float(),t_eval=t_eval,); t_eval_actual, sol_ys = to.odeint(self.ode_func, initial_obs_norm.float(), t_eval[0], solver=self.step_method, args=(actions_norm.float(),), dt0=dt0[0]); final_state_pred_norm=sol_ys[1]; return final_state_pred_norm
 
 # --- Reward Model ---
@@ -152,7 +156,13 @@ if __name__ == "__main__":
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     # --- Logging Setup ---
-    if args.track: try: import wandb; wandb.init( project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=run_name, monitor_gym=True, save_code=True,); print("WandB enabled.") except ImportError: print("WARNING: wandb not installed."); args.track=False
+    if args.track:
+        try:
+            import wandb
+            wandb.init( project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=run_name, monitor_gym=True, save_code=True,)
+            print("WandB enabled.")
+        except ImportError:
+            print("WARNING: wandb not installed."); args.track=False
     writer = SummaryWriter(f"runs/{run_name}"); writer.add_text("hyperparameters","|param|value|\n|-|-|\n%s"%("\n".join([f"|{key}|{value}|"for key,value in vars(args).items()])))
     print(f"Run name: {run_name}"); print(f"Arguments: {vars(args)}")
 

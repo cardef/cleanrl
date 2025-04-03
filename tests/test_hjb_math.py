@@ -349,6 +349,46 @@ def test_a_star_calculation(sample_data):
     print("Test a* calculation: PASSED")
 
 
-# TODO: Add test_hjb_residual if needed
-# def test_hjb_residual(sample_data):
-#     ...
+def test_hjb_residual(sample_data):
+    """Test the HJB residual calculation using analytical functions."""
+    s_np, _, s_torch, _ = sample_data
+    rho = 0.0 # Assume zero discount rate for simplicity in this analytical test
+
+    # --- Get Analytical Derivatives/Values ---
+    dVdx_a = dVds_analytical(s_np) # [batch, obs_dim]
+    V_s_a = V_dummy_analytical(s_np) # [batch]
+
+    # Calculate analytical a* (unclamped)
+    # a* = Q^{-1} (f2^T dVds - d)
+    # Need Q inverse
+    try:
+        Q_inv_np = np.linalg.inv(Q_np)
+    except np.linalg.LinAlgError:
+        pytest.skip("Analytical Q matrix is singular, cannot compute analytical a*.")
+
+    f2_a = f2_dummy_analytical(s_np) # [batch, obs_dim, action_dim]
+    f2_T_a = np.transpose(f2_a, (0, 2, 1)) # [batch, action_dim, obs_dim]
+    d_T_a = d_np.T # [1, action_dim]
+
+    # Batch calculation: term = (dVdx @ f2) - d^T
+    # dVdx [b, obs], f2 [b, obs, act] -> bmm(dVdx.unsqueeze(1), f2) -> [b, 1, act] -> squeeze(1) -> [b, act]
+    dVdx_f2 = np.einsum('bi,bio->bo', dVdx_a, f2_a) # More robust batch matmul [b, act]
+    term_for_a_star = dVdx_f2 - d_T_a # [b, act]
+
+    # Batch calculation: a* = term @ Q_inv^T (since Q is symmetric Q_inv^T = Q_inv)
+    # term [b, act], Q_inv [act, act] -> term @ Q_inv -> [b, act]
+    a_star_analytical_unclamped = term_for_a_star @ Q_inv_np # [b, act]
+
+    # --- Calculate HJB components with a* ---
+    R_s_astar = R_dummy_analytical(s_np, a_star_analytical_unclamped) # [batch]
+    f_s_astar = f_dummy_analytical(s_np, a_star_analytical_unclamped) # [batch, obs_dim]
+
+    # Calculate <dVds, f(s, a*)> using batch dot product (einsum)
+    dVds_dot_f = np.einsum('bi,bi->b', dVdx_a, f_s_astar) # [batch]
+
+    # --- Calculate HJB Residual ---
+    hjb_residual = R_s_astar + dVds_dot_f - rho * V_s_a # [batch]
+
+    # --- Assert residual is close to zero ---
+    assert np.allclose(hjb_residual, np.zeros_like(hjb_residual), atol=ATOL), "HJB residual mismatch"
+    print("Test HJB residual: PASSED")

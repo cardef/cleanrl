@@ -1248,6 +1248,7 @@ if __name__ == "__main__":
                     action_space_high_t,
                 ):
                     if f2_transpose is None:
+                        print("WARN: Eval f2_transpose is None.")
                         return None
                     # Need reward grad/hessian funcs defined above
                     if (
@@ -1256,15 +1257,21 @@ if __name__ == "__main__":
                     ):
                         print("WARN: Eval reward grad/hessian func not available.")
                         return None
+
                     zero_actions = torch.zeros(
                         s_norm_batch.shape[0], action_dim, device=device
                     )
-                    c1 = -vmap(eval_compute_reward_grad_func)(
-                        s_norm_batch, zero_actions
-                    )
-                    c2 = -vmap(eval_compute_reward_hessian_func)(
-                        s_norm_batch, zero_actions
-                    )
+                    try:
+                        c1 = -vmap(eval_compute_reward_grad_func)(
+                            s_norm_batch, zero_actions
+                        )
+                        c2 = -vmap(eval_compute_reward_hessian_func)(
+                            s_norm_batch, zero_actions
+                        )
+                    except Exception as e_grad_hess:
+                        print(f"WARN: Eval c1/c2 calculation failed: {e_grad_hess}")
+                        return None
+
                     c2_reg = (
                         c2 + torch.eye(action_dim, device=device) * args.hessian_reg
                     )
@@ -1273,27 +1280,37 @@ if __name__ == "__main__":
                     f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1)
                     term1 = c1 + f2T_dVdx
                     a_star_unclamped = None
+
                     try:
+                        # Use torch.linalg.solve
                         a_star_unclamped = torch.linalg.solve(
                             c2_reg, -term1.unsqueeze(-1)
                         ).squeeze(-1)
-                    except Exception:
+                    except torch.linalg.LinAlgError:
+                        # Fallback to pseudo-inverse if solve fails
+                        print("WARN: Eval torch.linalg.solve failed, using pinv.")
                         try:
+                            c2_reg_pinv = torch.linalg.pinv(c2_reg)
                             a_star_unclamped = torch.bmm(
-                                torch.linalg.pinv(c2_reg), -term1.unsqueeze(-1)
+                                c2_reg_pinv, -term1.unsqueeze(-1)
                             ).squeeze(-1)
                         except Exception as e_pinv:
-                            print(f"WARN: Eval a* pinv failed: {e_pinv}")
+                            print(f"ERROR: Eval a* pinv also failed: {e_pinv}")
                             return None
+                    except Exception as e_solve:
+                        # Catch other potential errors during solve
+                        print(f"ERROR: Eval a* solve encountered error: {e_solve}")
+                        return None
 
                     if a_star_unclamped is not None:
-                        # Clamp the action to the environment's action space bounds
-                        a_star_clamped = torch.max(
-                            torch.min(a_star_unclamped, action_space_high_t),
-                            action_space_low_t,
+                        # Clamp the final action to the environment's action space bounds
+                        a_star_clamped = torch.clamp(
+                            a_star_unclamped, action_space_low_t, action_space_high_t
                         )
                         return a_star_clamped
                     else:
+                        # This case should ideally not be reached if pinv is attempted
+                        print("ERROR: Eval a* calculation resulted in None unexpectedly.")
                         return None
 
             except Exception as e:

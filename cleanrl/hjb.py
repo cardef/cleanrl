@@ -1126,37 +1126,37 @@ if __name__ == "__main__":
                     dVdx_non_term = vmap(compute_value_grad_func)(obs_non_term)
                     # Pass dynamic_model.ode_func and action_dim to get_f1
                     f1_non_term = get_f1(obs_non_term, dynamic_model.ode_func, action_dim)  # f1(s_norm)
-                        f2_T_non_term = compute_f_jac_func(obs_non_term)  # f2(s_norm)^T
+                    f2_T_non_term = compute_f_jac_func(obs_non_term)  # f2(s_norm)^T
 
-                        zero_actions_non_term = torch.zeros_like(
-                            actions_buffer_raw
-                        )  # Use actions_buffer_raw shape
-                        c1 = -vmap(compute_reward_grad_func)(
-                            obs_non_term, zero_actions_non_term
-                        )  # -grad_a R(s_norm, 0)
-                        c2 = -vmap(compute_reward_hessian_func)(
-                            obs_non_term, zero_actions_non_term
-                        )  # -hess_aa R(s_norm, 0)
-                        c2_reg = (
-                            c2 + torch.eye(action_dim, device=device) * args.hessian_reg
-                        )  # Regularize Hessian
+                    zero_actions_non_term = torch.zeros_like(
+                        actions_buffer_raw
+                    )  # Use actions_buffer_raw shape
+                    c1 = -vmap(compute_reward_grad_func)(
+                        obs_non_term, zero_actions_non_term
+                    )  # -grad_a R(s_norm, 0)
+                    c2 = -vmap(compute_reward_hessian_func)(
+                        obs_non_term, zero_actions_non_term
+                    )  # -hess_aa R(s_norm, 0)
+                    c2_reg = (
+                        c2 + torch.eye(action_dim, device=device) * args.hessian_reg
+                    )  # Regularize Hessian
 
-                        if (
-                            f2_T_non_term is not None
-                            and c1 is not None
-                            and c2_reg is not None
-                        ):
-                            # Calculate a* (now clamped inside the function)
-                            a_star_non_term = calculate_a_star_quad_approx(
-                                dVdx_non_term,
-                                f2_T_non_term,
-                                c1,
-                                c2_reg,
-                                action_space_low_t,
-                                action_space_high_t,
-                            )
+                    if (
+                        f2_T_non_term is not None
+                        and c1 is not None
+                        and c2_reg is not None
+                    ):
+                        # Calculate a* (now clamped inside the function)
+                        a_star_non_term = calculate_a_star_quad_approx(
+                            dVdx_non_term,
+                            f2_T_non_term,
+                            c1,
+                            c2_reg,
+                            action_space_low_t,
+                            action_space_high_t,
+                        )
 
-                            if a_star_non_term is not None:
+                        if a_star_non_term is not None:
                                 # Debug Print: Show first few a* values (Now prints every time)
                                 num_to_show = min(3, len(a_star_non_term))
                                 print(f"  Debug GStep {global_step} - Calculated a*[:{num_to_show}]:\n{a_star_non_term[:num_to_show].detach().cpu().numpy()}")

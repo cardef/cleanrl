@@ -674,24 +674,24 @@ if __name__ == "__main__":
                     dVdx = vmap(compute_value_grad_func)(obs_tensor)
                     f2_T = compute_f_jac_func(obs_tensor)
                     zero_actions_obs = torch.zeros_like(actions_star)
-                        c1 = -vmap(compute_reward_grad_func)(
-                            obs_tensor, zero_actions_obs
-                        )
-                        c2 = -vmap(compute_reward_hessian_func)(
-                            obs_tensor, zero_actions_obs
-                        )
-                        c2_reg = (
-                            c2 + torch.eye(action_dim, device=device) * args.hessian_reg
-                        )
-                        # Calculate a* (now clamped inside the function)
-                        actions_star = calculate_a_star_quad_approx(
-                            dVdx,
-                            f2_T,
-                            c1,
-                            c2_reg,
-                            action_space_low_t,
-                            action_space_high_t,
-                        )
+                    c1 = -vmap(compute_reward_grad_func)(
+                        obs_tensor, zero_actions_obs
+                    )
+                    c2 = -vmap(compute_reward_hessian_func)(
+                        obs_tensor, zero_actions_obs
+                    )
+                    c2_reg = (
+                        c2 + torch.eye(action_dim, device=device) * args.hessian_reg
+                    )
+                    # Calculate a* (now clamped inside the function)
+                    actions_star = calculate_a_star_quad_approx(
+                        dVdx,
+                        f2_T,
+                        c1,
+                        c2_reg,
+                        action_space_low_t,
+                        action_space_high_t,
+                    )
                     # No fallback here, error will propagate if actions_star is None or calculation failed
 
                 noise = torch.normal(

@@ -1258,6 +1258,7 @@ if __name__ == "__main__":
                         print("WARN: Eval reward grad/hessian func not available.")
                         return None
 
+                    # Compute reward model gradients/hessians using eval models
                     zero_actions = torch.zeros(
                         s_norm_batch.shape[0], action_dim, device=device
                     )
@@ -1268,21 +1269,21 @@ if __name__ == "__main__":
                         c2 = -vmap(eval_compute_reward_hessian_func)(
                             s_norm_batch, zero_actions
                         )
-                    except Exception as e_grad_hess:
-                        print(f"WARN: Eval c1/c2 calculation failed: {e_grad_hess}")
+                    except Exception as e:
+                        print(f"WARN: Eval reward grad/hess failed: {e}")
                         return None
 
+                    # Regularize Hessian and compute terms for quadratic approximation
                     c2_reg = (
                         c2 + torch.eye(action_dim, device=device) * args.hessian_reg
                     )
-
                     dVdx_col = dVdx_norm.unsqueeze(-1)
                     f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1)
                     term1 = c1 + f2T_dVdx
                     a_star_unclamped = None
 
                     try:
-                        # Use torch.linalg.solve
+                        # Attempt to solve using torch.linalg.solve
                         a_star_unclamped = torch.linalg.solve(
                             c2_reg, -term1.unsqueeze(-1)
                         ).squeeze(-1)
@@ -1302,15 +1303,14 @@ if __name__ == "__main__":
                         print(f"ERROR: Eval a* solve encountered error: {e_solve}")
                         return None
 
+                    # If calculation succeeded, clamp the action
                     if a_star_unclamped is not None:
-                        # Clamp the final action to the environment's action space bounds
-                        a_star_clamped = torch.clamp(
+                        return torch.clamp(
                             a_star_unclamped, action_space_low_t, action_space_high_t
                         )
-                        return a_star_clamped
                     else:
-                        # This case should ideally not be reached if pinv is attempted
-                        print("ERROR: Eval a* calculation resulted in None unexpectedly.")
+                        # This path indicates a failure even with pinv fallback
+                        print("ERROR: Eval a* calculation resulted in None after attempting solve and pinv.")
                         return None
 
             except Exception as e:

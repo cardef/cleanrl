@@ -1463,10 +1463,10 @@ if __name__ == "__main__":
                                             for _ in range(eval_norm_envs.num_envs)
                                         ]
                                     )
-                            else:
-                                action = np.array(
-                                    [
-                                        eval_norm_envs.action_space.sample()
+                        else: # Corrected indentation
+                            action = np.array(
+                                [
+                                    eval_norm_envs.action_space.sample()
                                         for _ in range(eval_norm_envs.num_envs)
                                     ]
                                 )
@@ -1479,13 +1479,6 @@ if __name__ == "__main__":
                                     for _ in range(eval_norm_envs.num_envs)
                                 ]
                             )
-                    else:
-                        action = np.array(
-                            [
-                                eval_norm_envs.action_space.sample()
-                                for _ in range(eval_norm_envs.num_envs)
-                            ]
-                        )
 
                 obs_norm_np, reward_raw_step, term, trunc, info = eval_norm_envs.step(
                     action

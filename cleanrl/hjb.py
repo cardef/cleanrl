@@ -593,18 +593,20 @@ if __name__ == "__main__":
                     jacobian_matrix = compute_jac_f_a(
                         torch.tensor(0.0), s_batch, a_batch
                     )
-                    # Assuming jacrev returns shape [1, obs_dim, action_dim] for batch-1 inputs,
-                    # squeeze the leading batch dimension.
-                    # Ensure the output is always [obs_dim, action_dim]
-                    if jacobian_matrix.dim() > 2: # Handle potential extra batch dims from jacrev
-                        jacobian_matrix = jacobian_matrix.squeeze(0)
-                    # Add another squeeze just in case jacrev behaves differently sometimes
-                    if jacobian_matrix.dim() > 2:
-                         jacobian_matrix = jacobian_matrix.squeeze(0)
-                    return jacobian_matrix # Result shape: [obs_dim, action_dim]
+                    # jacrev output shape can be inconsistent. Aim for [obs_dim, action_dim].
+                    # Example output shapes seen: [1, obs_dim, action_dim], [obs_dim, 1, action_dim] etc.
+                    # Reshape explicitly to the target dimension.
+                    target_shape = (s_batch.shape[-1], a_batch.shape[-1]) # (obs_dim, action_dim)
+                    try:
+                        reshaped_jacobian = jacobian_matrix.reshape(target_shape)
+                    except RuntimeError as e:
+                         print(f"WARN: Could not reshape Jacobian from {jacobian_matrix.shape} to {target_shape}. Error: {e}")
+                         # Return a zero matrix of the correct shape as fallback
+                         reshaped_jacobian = torch.zeros(target_shape, device=s_batch.device, dtype=s_batch.dtype)
+                    return reshaped_jacobian # Ensure [obs_dim, action_dim]
 
 
-                f2_matrices = vmap(compute_jac_for_single_s)(s_norm_batch, zero_actions) # Shape: [batch, obs_dim, action_dim]
+                f2_matrices = vmap(compute_jac_for_single_s)(s_norm_batch, zero_actions) # Expect [batch, obs_dim, action_dim]
                 f2_transpose = torch.permute(f2_matrices, (0, 2, 1)) # Shape: [batch, action_dim, obs_dim]
                 return f2_transpose
 
@@ -1142,19 +1144,29 @@ if __name__ == "__main__":
                             if a_star_non_term is not None:
                                 # Calculate H(a*) = R(s, a*) + <dVdx, f(s, a*)> using learned models
                                 # NOTE: We use the *clamped* a_star here for H calculation
-                                with torch.no_grad():
-                                    # Need f(s, a*) = f1 + f2 * a*
-                                    f_star_non_term = f1_non_term + torch.bmm(
-                                        torch.permute(f2_T_non_term, (0, 2, 1)),
-                                        a_star_non_term.unsqueeze(-1),
-                                    ).squeeze(-1)
-                                    # Need R(s, a*) - predict using reward model (predicts raw reward)
-                                    r_star_non_term = reward_model(
-                                        obs_non_term, a_star_non_term
-                                    )
 
+                                # Ensure models are in eval mode if not training them here
+                                dynamic_model.eval()
+                                reward_model.eval()
+
+                                # Need f(s, a*) = f1 + f2 * a*
+                                # f1_non_term and f2_T_non_term were calculated outside no_grad
+                                f_star_non_term = f1_non_term + torch.bmm(
+                                    torch.permute(f2_T_non_term, (0, 2, 1)), # [b, obs, act]
+                                    a_star_non_term.unsqueeze(-1), # [b, act, 1]
+                                ).squeeze(-1) # [b, obs]
+                                # Need R(s, a*) - predict using reward model (predicts raw reward)
+                                r_star_non_term = reward_model(
+                                    obs_non_term, a_star_non_term
+                                )
+
+                                # Restore train mode if they were training
+                                # dynamic_model.train() # Not needed as models are only trained periodically
+                                # reward_model.train()
+
+                                # Calculate Hamiltonian. dVdx_non_term MUST retain grads to critic.
                                 hamiltonian_star = r_star_non_term + torch.einsum(
-                                    "bi,bi->b", dVdx_non_term, f_star_non_term
+                                    "bi,bi->b", dVdx_non_term, f_star_non_term.detach() # Detach f* only
                                 )
 
                                 # HJB residual: H(a*) - rho * V
@@ -1336,22 +1348,25 @@ if __name__ == "__main__":
                         c2 + torch.eye(action_dim, device=device) * args.hessian_reg
                     )
                     dVdx_col = dVdx_norm.unsqueeze(-1)
+                    # Calculate term H_a(0) = R_a(0) + V_s^T f2 = -c1 + dVdx^T f2
                     f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1)
-                    term1 = c1 + f2T_dVdx
+                    term1 = -c1 + f2T_dVdx # Corrected sign for c1
                     a_star_unclamped = None
 
                     try:
                         # Attempt to solve using torch.linalg.solve
+                        # Solve c2_reg * a* = term1
                         a_star_unclamped = torch.linalg.solve(
-                            c2_reg, -term1.unsqueeze(-1)
+                            c2_reg, term1.unsqueeze(-1) # Removed negative sign
                         ).squeeze(-1)
                     except torch.linalg.LinAlgError:
                         # Fallback to pseudo-inverse if solve fails
                         print("WARN: Eval torch.linalg.solve failed, using pinv.")
                         try:
                             c2_reg_pinv = torch.linalg.pinv(c2_reg)
+                            # a* = c2_pinv * term1
                             a_star_unclamped = torch.bmm(
-                                c2_reg_pinv, -term1.unsqueeze(-1)
+                                c2_reg_pinv, term1.unsqueeze(-1) # Removed negative sign
                             ).squeeze(-1)
                         except Exception as e_pinv:
                             print(f"ERROR: Eval a* pinv also failed: {e_pinv}")

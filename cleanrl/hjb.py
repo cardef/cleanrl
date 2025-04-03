@@ -111,7 +111,7 @@ class Args:
     hjb_coef: float = 1.0
     use_hjb_loss: bool = True
     terminal_coeff: float = 1.0
-    hessian_reg: float = 1e-3  # Regularization for Hessian inversion
+    hessian_reg: float = 0.1  # Regularization for Hessian inversion (Increased default)
     """Regularization added to the reward Hessian before inversion."""
 
     # Env Args
@@ -1157,6 +1157,13 @@ if __name__ == "__main__":
                         )
 
                         if a_star_non_term is not None:
+                                # Debug Print: Show norms of inputs to a* calc
+                                if global_step % 1000 == 0: # Print occasionally
+                                    print(f"  Debug GStep {global_step} - a* Input Norms:")
+                                    print(f"    ||dVdx||: {torch.linalg.norm(dVdx_non_term).item():.4f}")
+                                    print(f"    ||f2_T||: {torch.linalg.norm(f2_T_non_term).item():.4f}")
+                                    print(f"    ||c1||:   {torch.linalg.norm(c1).item():.4f}")
+                                    print(f"    ||c2_reg||:{torch.linalg.norm(c2_reg).item():.4f}")
                                 # Debug Print: Show first few a* values (Now prints every time)
                                 num_to_show = min(3, len(a_star_non_term))
                                 print(f"  Debug GStep {global_step} - Calculated a*[:{num_to_show}]:\n{a_star_non_term[:num_to_show].detach().cpu().numpy()}")

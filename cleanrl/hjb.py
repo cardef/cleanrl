@@ -1088,6 +1088,7 @@ if __name__ == "__main__":
 
                 # B. Non-Terminal State Loss (HJB)
                 hjb_loss_non_term = torch.tensor(0.0, device=device)
+                hjb_calculation_successful = False # Flag to track success
                 if (
                     non_terminations_mask.any()
                     and args.use_hjb_loss
@@ -1172,28 +1173,39 @@ if __name__ == "__main__":
                                 # HJB residual: H(a*) - rho * V
                                 hjb_residual = hamiltonian_star - rho * v_non_term
                                 hjb_loss_non_term = 0.5 * (hjb_residual**2).mean()
+                                hjb_calculation_successful = True # Mark as successful
                             else:
                                 print(
-                                    "WARN: HJB skipped due to a* calculation failure."
+                                    f"WARN GStep {global_step}: HJB skipped due to a* calculation failure."
                                 )
                         else:
                             print(
-                                "WARN: HJB skipped due to f2/c1/c2 calculation failure."
+                                f"WARN GStep {global_step}: HJB skipped due to f2/c1/c2 calculation failure."
                             )
                     except Exception as e:
-                        print(f"HJB Error:{e}")
-                        hjb_loss_non_term = torch.tensor(0.0, device=device)
+                        print(f"HJB Error GStep {global_step}: {e}")
+                        # hjb_loss_non_term remains 0, hjb_calculation_successful remains False
 
                 # C. Total Critic Loss & Update
+                skip_critic_update = False
+                if args.use_hjb_loss and non_terminations_mask.any() and not hjb_calculation_successful:
+                    print(f"WARN GStep {global_step}: Skipping critic update due to HJB calculation failure.")
+                    skip_critic_update = True
+
                 critic_loss = (
                     args.hjb_coef * hjb_loss_non_term
                     + args.terminal_coeff * terminal_critic_loss
                 )
-                critic_optimizer.zero_grad()
-                critic_loss.backward()
-                if args.grad_norm_clip is not None:
-                    nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
-                critic_optimizer.step()
+
+                if not skip_critic_update:
+                    critic_optimizer.zero_grad()
+                    critic_loss.backward()
+                    if args.grad_norm_clip is not None:
+                        nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
+                    critic_optimizer.step()
+                else:
+                    # Ensure gradients are cleared even if update is skipped
+                    critic_optimizer.zero_grad()
 
                 # Logging Critic losses
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)

@@ -80,13 +80,13 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "HalfCheetah-v4"
     total_timesteps: int = 1000000
-    learning_rate: float = 1e-3  # LR for Critic (V function)
+    learning_rate: float = 3e-4  # LR for Critic (V function)
     buffer_size: int = int(1e6)
     gamma: float = 0.99
     batch_size: int = 256  # Agent update batch size
     learning_starts: int = 5000
     exploration_noise_std: float = 0.1  # Std dev for noise added to optimal action
-    grad_norm_clip: Optional[float] = 1.0
+    grad_norm_clip: Optional[float] = 0.5
 
     # Model Training Args
     model_train_freq: int = 250
@@ -201,15 +201,8 @@ class DynamicModel(nn.Module):  # (Same)
             y0=initial_obs_norm.float(),
             t_eval=t_eval,
         )
-        t_eval_actual, sol_ys = to.odeint(
-            self.ode_func,
-            initial_obs_norm.float(),
-            t_eval[0],
-            solver=self.step_method,
-            args=(actions_norm.float(),),
-            dt0=dt0[0],
-        )
-        final_state_pred_norm = sol_ys[1]
+        sol = self.adjoint.solve(problem, args=actions_norm.float(), dt0=dt0)
+        final_state_pred_norm = sol.ys[:, 1, :]
         return final_state_pred_norm
 
 
@@ -541,7 +534,7 @@ if __name__ == "__main__":
         a_star = (-1.0 / (2.0 * ctrl_cost_weight)) * torch.bmm(
             f2_transpose, dVdx_col
         ).squeeze(-1)
-        return a_star
+        return a_star #clamp a_star to action space bounds ai!
 
     # ========================================================================
     # <<< Main Training Loop >>>

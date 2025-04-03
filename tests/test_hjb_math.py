@@ -400,3 +400,226 @@ def test_hjb_residual(sample_data):
     # a* should maximize the Hamiltonian, so H(s, a*) must be >= H(s, 0)
     assert np.all(H_s_astar >= H_s_zero - ATOL), "H(s, a*) should be >= H(s, 0)"
     print("Test HJB residual components (H(a*) >= H(0)): PASSED")
+
+
+def test_a_star_none_inputs(sample_data):
+    """Test calculate_a_star_quad_approx returns None if inputs are None."""
+    s_np, _, s_torch, _ = sample_data
+    action_space_low_t = torch.tensor([-1.0] * ACTION_DIM, device=DEVICE)
+    action_space_high_t = torch.tensor([1.0] * ACTION_DIM, device=DEVICE)
+
+    # Get valid analytical derivatives first
+    dVdx_analytical_batch = torch.tensor(dVds_analytical(s_np), device=DEVICE).float()
+    a_zeros_np = np.zeros((BATCH_SIZE, ACTION_DIM))
+    c1_analytical_batch = torch.tensor(
+        -dRda_analytical(s_np, a_zeros_np), device=DEVICE
+    ).float()
+    c2_analytical_batch = torch.tensor(
+        -d2Rda2_analytical(s_np, a_zeros_np), device=DEVICE
+    ).float()
+    f2_analytical_batch = torch.tensor(
+        f2_dummy_analytical(s_np), device=DEVICE
+    ).float()
+    f2_T_analytical_batch = torch.permute(
+        f2_analytical_batch, (0, 2, 1)
+    )
+    c2_reg_analytical = c2_analytical_batch + torch.eye(
+        ACTION_DIM, device=DEVICE
+    ) * 1e-3 # Add some regularization
+
+    # Test with None f2_transpose
+    a_star_none_f2 = calculate_a_star_quad_approx(
+        dVdx_analytical_batch,
+        None, # f2_transpose is None
+        c1_analytical_batch,
+        c2_reg_analytical,
+        action_space_low_t,
+        action_space_high_t,
+    )
+    assert a_star_none_f2 is None, "Should return None when f2_transpose is None"
+    print("Test a* None f2: PASSED")
+
+    # Test with None c1
+    a_star_none_c1 = calculate_a_star_quad_approx(
+        dVdx_analytical_batch,
+        f2_T_analytical_batch,
+        None, # c1 is None
+        c2_reg_analytical,
+        action_space_low_t,
+        action_space_high_t,
+    )
+    assert a_star_none_c1 is None, "Should return None when c1 is None"
+    print("Test a* None c1: PASSED")
+
+    # Test with None c2_reg
+    a_star_none_c2 = calculate_a_star_quad_approx(
+        dVdx_analytical_batch,
+        f2_T_analytical_batch,
+        c1_analytical_batch,
+        None, # c2_reg is None
+        action_space_low_t,
+        action_space_high_t,
+    )
+    assert a_star_none_c2 is None, "Should return None when c2_reg is None"
+    print("Test a* None c2: PASSED")
+
+
+def test_a_star_singular_hessian(sample_data):
+    """Test calculate_a_star uses pseudo-inverse for singular Hessian."""
+    s_np, _, s_torch, _ = sample_data
+    action_space_low_t = torch.tensor([-1.0] * ACTION_DIM, device=DEVICE)
+    action_space_high_t = torch.tensor([1.0] * ACTION_DIM, device=DEVICE)
+    hessian_reg = 0.0 # Use zero regularization to force singularity if c2 is singular
+
+    # Get analytical derivatives
+    dVdx_analytical_batch = torch.tensor(dVds_analytical(s_np), device=DEVICE).float()
+    a_zeros_np = np.zeros((BATCH_SIZE, ACTION_DIM))
+    c1_analytical_batch = torch.tensor(
+        -dRda_analytical(s_np, a_zeros_np), device=DEVICE
+    ).float()
+    f2_analytical_batch = torch.tensor(
+        f2_dummy_analytical(s_np), device=DEVICE
+    ).float()
+    f2_T_analytical_batch = torch.permute(
+        f2_analytical_batch, (0, 2, 1)
+    )
+
+    # Create a singular c2 (e.g., rank deficient if ACTION_DIM > 1)
+    # For ACTION_DIM=2, make one eigenvalue zero. Use -d2R/da2 = Q
+    singular_Q = np.array([[1.0, 0.0], [0.0, 0.0]]) # Singular matrix
+    c2_singular_np = np.tile(singular_Q, (BATCH_SIZE, 1, 1))
+    c2_singular_batch = torch.tensor(c2_singular_np, device=DEVICE).float()
+
+    # c2_reg will also be singular since hessian_reg is 0
+    c2_reg_singular = c2_singular_batch + torch.eye(
+        ACTION_DIM, device=DEVICE
+    ) * hessian_reg
+
+    # --- Call the function under test ---
+    # Expect a warning about pinv, but should not raise an error
+    print("\nTesting singular Hessian (expect LinAlgError warning -> pinv):")
+    a_star_calculated = calculate_a_star_quad_approx(
+        dVdx_analytical_batch,
+        f2_T_analytical_batch,
+        c1_analytical_batch,
+        c2_reg_singular, # Pass the singular matrix
+        action_space_low_t,
+        action_space_high_t,
+    )
+
+    # --- Assert output is not None (pseudo-inverse should have worked) ---
+    assert a_star_calculated is not None, "a* calculation returned None for singular Hessian (pinv should have run)"
+
+    # --- Optional: Calculate Expected a* Analytically using pseudo-inverse ---
+    term1_torch = c1_analytical_batch + torch.bmm(
+        f2_T_analytical_batch, dVdx_analytical_batch.unsqueeze(-1)
+    ).squeeze(-1)
+    c2_reg_pinv_torch = torch.linalg.pinv(c2_reg_singular)
+    a_star_expected_unclamped = torch.bmm(
+        c2_reg_pinv_torch, -term1_torch.unsqueeze(-1)
+    ).squeeze(-1)
+    a_star_expected_clamped = torch.clamp(
+        a_star_expected_unclamped, action_space_low_t, action_space_high_t
+    )
+
+    assert torch.allclose(
+        a_star_calculated, a_star_expected_clamped, atol=ATOL
+    ), "a* calculation mismatch with analytical pinv result"
+
+    print("Test a* singular Hessian (pinv): PASSED")
+
+
+def test_a_star_clamping(sample_data):
+    """Test calculate_a_star clamps the result correctly."""
+    s_np, _, s_torch, _ = sample_data
+    # Use wider bounds temporarily to calculate unclamped a*
+    wide_bounds_low = torch.tensor([-100.0] * ACTION_DIM, device=DEVICE)
+    wide_bounds_high = torch.tensor([100.0] * ACTION_DIM, device=DEVICE)
+    # Target bounds for clamping check
+    target_bounds_low = torch.tensor([-0.5] * ACTION_DIM, device=DEVICE)
+    target_bounds_high = torch.tensor([0.5] * ACTION_DIM, device=DEVICE)
+    hessian_reg = 1e-3
+
+    # Get analytical derivatives
+    dVdx_analytical_batch = torch.tensor(dVds_analytical(s_np), device=DEVICE).float()
+    a_zeros_np = np.zeros((BATCH_SIZE, ACTION_DIM))
+    # --- Modify c1 to force a* outside target bounds ---
+    # Original c1 = -dR/da|a=0 = d^T
+    # a* approx = (Q+reg*I)^-1 * (d + f2^T dVdx)
+    # Make c1 large positive -> term1 large positive -> a* large negative
+    # Make c1 large negative -> term1 large negative -> a* large positive
+    c1_force_large_neg = torch.ones_like(dVdx_analytical_batch[:, 0:ACTION_DIM]) * 1000.0
+    c1_force_large_pos = torch.ones_like(dVdx_analytical_batch[:, 0:ACTION_DIM]) * -1000.0
+
+    c2_analytical_batch = torch.tensor(
+        -d2Rda2_analytical(s_np, a_zeros_np), device=DEVICE
+    ).float()
+    f2_analytical_batch = torch.tensor(
+        f2_dummy_analytical(s_np), device=DEVICE
+    ).float()
+    f2_T_analytical_batch = torch.permute(
+        f2_analytical_batch, (0, 2, 1)
+    )
+    c2_reg_analytical = c2_analytical_batch + torch.eye(
+        ACTION_DIM, device=DEVICE
+    ) * hessian_reg
+
+    # --- Case 1: Force a* below lower bound ---
+    a_star_neg = calculate_a_star_quad_approx(
+        dVdx_analytical_batch,
+        f2_T_analytical_batch,
+        c1_force_large_neg, # Use modified c1
+        c2_reg_analytical,
+        target_bounds_low, # Target bounds
+        target_bounds_high,
+    )
+    assert a_star_neg is not None, "a* calculation failed for negative force case"
+    assert torch.all(a_star_neg >= target_bounds_low - ATOL), "a* not clamped to lower bound"
+    # Check if it actually clamped (at least one element should be close to the bound)
+    assert torch.any(torch.isclose(a_star_neg, target_bounds_low, atol=ATOL)), "a* seems not to have been clamped low"
+    print("Test a* clamping (low): PASSED")
+
+    # --- Case 2: Force a* above upper bound ---
+    a_star_pos = calculate_a_star_quad_approx(
+        dVdx_analytical_batch,
+        f2_T_analytical_batch,
+        c1_force_large_pos, # Use modified c1
+        c2_reg_analytical,
+        target_bounds_low, # Target bounds
+        target_bounds_high,
+    )
+    assert a_star_pos is not None, "a* calculation failed for positive force case"
+    assert torch.all(a_star_pos <= target_bounds_high + ATOL), "a* not clamped to upper bound"
+    # Check if it actually clamped (at least one element should be close to the bound)
+    assert torch.any(torch.isclose(a_star_pos, target_bounds_high, atol=ATOL)), "a* seems not to have been clamped high"
+    print("Test a* clamping (high): PASSED")
+
+
+def test_get_f1_direct(sample_data):
+    """Test the get_f1 helper function directly."""
+    s_np, _, s_torch, _ = sample_data
+
+    # Define a dummy ODE function matching the signature expected by get_f1
+    # This uses the analytical torch tensors defined earlier (A_torch, b_torch)
+    def dummy_ode_func(t, s_norm_batch, a_batch):
+        # f(s, a) = A s + b + B a
+        # f1 is f(s, 0) = A s + b
+        # Ensure s_norm_batch is [batch, obs_dim]
+        s_norm_batch = s_norm_batch.reshape(BATCH_SIZE, OBS_DIM)
+        # A @ s.T -> [obs, obs] @ [obs, batch] -> [obs, batch] -> .T -> [batch, obs]
+        f1_val = (A_torch @ s_norm_batch.T).T + b_torch.unsqueeze(0) # Add broadcastable b
+        # B @ a.T -> [obs, act] @ [act, batch] -> [obs, batch] -> .T -> [batch, obs]
+        f2a_val = (B_torch @ a_batch.T).T
+        return f1_val + f2a_val
+
+    # Call the actual get_f1 function from hjb.py
+    from cleanrl.hjb import get_f1
+    f1_numerical = get_f1(s_torch, dummy_ode_func, ACTION_DIM)
+
+    # Calculate analytical f1
+    f1_analytical = f1_dummy_analytical(s_np)
+
+    assert np.allclose(
+        f1_numerical.cpu().numpy(), f1_analytical, atol=ATOL
+    ), "get_f1 output mismatch"
+    print("Test get_f1 direct: PASSED")

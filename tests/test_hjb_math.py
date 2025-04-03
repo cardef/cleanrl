@@ -127,7 +127,7 @@ Q_torch = torch.tensor(Q_np, dtype=torch.float32, device=DEVICE)
 M_torch = torch.tensor(M_np, dtype=torch.float32, device=DEVICE)
 d_torch = torch.tensor(d_np, dtype=torch.float32, device=DEVICE)
 A_torch = torch.tensor(A_np, dtype=torch.float32, device=DEVICE)
-b_torch = torch.tensor(b_np, dtype=torch.float32, device=DEVICE)
+b_torch = torch.tensor(b_np.squeeze(), dtype=torch.float32, device=DEVICE) # Squeeze to make 1D
 B_torch = torch.tensor(B_np, dtype=torch.float32, device=DEVICE)
 
 
@@ -159,10 +159,12 @@ def f_dummy_torch_wrapper(s_tensor, a_tensor):
     """Input: 1D tensors s, a. Output: 1D tensor f(s,a)"""
     s_tensor = s_tensor.float()
     a_tensor = a_tensor.float()
-    f1_val = (A_torch @ s_tensor.T + b_torch).T
-    f2_val = B_torch  # Constant B
+    # Use direct matmul: [obs,obs]@[obs] + [obs] -> [obs]
+    f1_val = A_torch @ s_tensor + b_torch
+    f2_val = B_torch  # Constant B [obs_dim, action_dim]
+    # Use direct matmul: [obs,act]@[act] -> [obs]
     f2a_term = f2_val @ a_tensor
-    return f1_val + f2a_term
+    return f1_val + f2a_term # [obs]
 
 
 # --- 3. Test Fixtures ---
@@ -229,16 +231,8 @@ def test_f_jacobian(sample_data):
 
     # Numerical Jacobian using vmap(jacrev(...))
     # jacrev(f, argnums=1) computes df/da for f(s, a)
-    compute_f_jac_func_dummy = jacrev(f_dummy_torch_wrapper, argnums=1)
-    # The output shape of jacrev might be [obs_dim, action_dim] for single inputs
-    # vmap applies this over the batch, resulting in [batch, obs_dim, action_dim]
-    # Use a helper function with lambda to ensure jacrev differentiates only w.r.t 'a'
-    def compute_jac_single(s, a):
-        # Define the function of 'a' only, capturing 's'
-        func_of_a = lambda a_arg: f_dummy_torch_wrapper(s, a_arg)
-        return jacrev(func_of_a)(a) # Should return [obs_dim, action_dim]
-
-    dfda_numerical = vmap(compute_jac_single)(s_torch, a_torch) # Should be [batch, obs_dim, action_dim]
+    # vmap applies this over the batch dimension.
+    dfda_numerical = vmap(jacrev(f_dummy_torch_wrapper, argnums=1))(s_torch, a_torch) # Expect [batch, obs_dim, action_dim]
 
     # Analytical Jacobian (f2)
     f2_analytical_val = f2_dummy_analytical(s_np) # Expect [batch, obs_dim, action_dim]

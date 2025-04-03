@@ -462,7 +462,7 @@ if __name__ == "__main__":
                         f1_non_term = get_f1(obs_non_term) # f1(s_norm)
                         f2_T_non_term = compute_f_jac_func(obs_non_term) # f2(s_norm)^T
 
-                        zero_actions_non_term = torch.zeros_like(actions_buffer_non_term)
+                        zero_actions_non_term = torch.zeros_like(actions_buffer_raw) # Use actions_buffer_raw shape
                         c1 = -vmap(compute_reward_grad_func)(obs_non_term, zero_actions_non_term) # -grad_a R(s_norm, 0)
                         c2 = -vmap(compute_reward_hessian_func)(obs_non_term, zero_actions_non_term) # -hess_aa R(s_norm, 0)
                         c2_reg = c2 + torch.eye(action_dim, device=device) * args.hessian_reg # Regularize Hessian

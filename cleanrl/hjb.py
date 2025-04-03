@@ -190,7 +190,14 @@ if __name__ == "__main__":
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     # --- Logging Setup ---
-    if args.track: try: import wandb; wandb.init(project=args.wandb_project_name,entity=args.wandb_entity,sync_tensorboard=True,config=vars(args),name=run_name,monitor_gym=True,save_code=True,); print("WandB enabled.") except ImportError: print("WARNING: wandb not installed.");args.track=False
+    if args.track:
+        try:
+            import wandb
+            wandb.init(project=args.wandb_project_name,entity=args.wandb_entity,sync_tensorboard=True,config=vars(args),name=run_name,monitor_gym=True,save_code=True,)
+            print("WandB enabled.")
+        except ImportError:
+            print("WARNING: wandb not installed.")
+            args.track=False
     writer = SummaryWriter(f"runs/{run_name}"); writer.add_text("hyperparameters","|param|value|\n|-|-|\n%s"%("\n".join([f"|{key}|{value}|"for key,value in vars(args).items()])))
     print(f"Run name: {run_name}"); print(f"Arguments: {vars(args)}")
 

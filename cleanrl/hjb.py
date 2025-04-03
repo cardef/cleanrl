@@ -197,7 +197,14 @@ if __name__ == "__main__":
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     # --- Logging Setup ---
-    if args.track: try: import wandb; wandb.init(project=args.wandb_project_name,entity=args.wandb_entity,sync_tensorboard=True,config=vars(args),name=run_name,monitor_gym=True,save_code=True,); print("WandB enabled.") except ImportError: print("WARNING: wandb not installed.");args.track=False
+    if args.track:
+        try:
+            import wandb
+            wandb.init(project=args.wandb_project_name,entity=args.wandb_entity,sync_tensorboard=True,config=vars(args),name=run_name,monitor_gym=True,save_code=True,)
+            print("WandB enabled.")
+        except ImportError:
+            print("WARNING: wandb not installed.")
+            args.track=False
     writer = SummaryWriter(f"runs/{run_name}"); writer.add_text("hyperparameters","|param|value|\n|-|-|\n%s"%("\n".join([f"|{key}|{value}|"for key,value in vars(args).items()])))
     print(f"Run name: {run_name}"); print(f"Arguments: {vars(args)}")
 
@@ -393,11 +400,25 @@ if __name__ == "__main__":
              # ... [Same logic as before, omitted for brevity] ...
              non_terminal_mask_dyn=dones_term_only_t.squeeze(-1)==0;dyn_obs_t=obs_norm_t[non_terminal_mask_dyn];dyn_acts_t=actions_t[non_terminal_mask_dyn];dyn_targets_t=next_obs_norm_target_t[non_terminal_mask_dyn];
              if len(dyn_obs_t)<2:print("Warn:Not enough samples for dyn model.");dynamic_model_accurate=False
-             else:indices=torch.randperm(len(dyn_obs_t),device=device);split=int(len(dyn_obs_t)*(1-args.model_val_ratio));train_idx,val_idx=indices[:split],indices[split:];train_dataset=TensorDataset(dyn_obs_t[train_idx],dyn_acts_t[train_idx],dyn_targets_t[train_idx]);val_dataset=TensorDataset(dyn_obs_t[val_idx],dyn_acts_t[val_idx],dyn_targets_t[val_idx]);train_loader=DataLoader(train_dataset,batch_size=args.model_train_batch_size,shuffle=True);val_loader=DataLoader(val_dataset,batch_size=args.model_train_batch_size);print(f"DynModel:Tr={len(train_idx)},Vl={len(val_idx)}");best_val_loss=float('inf');patience_counter=0;dynamic_model_accurate=False;best_dyn_state_dict=None;final_model_epoch=0;dynamic_model.train()
-             for epoch in range(args.model_max_epochs):final_model_epoch=epoch;train_loss=0;num_train_batches=0;for _ in range(args.model_updates_per_epoch):epoch_train_loss=train_model_epoch(dynamic_model,dynamics_optimizer,train_loader,device,writer,epoch,global_step,"dynamic",True);train_loss+=epoch_train_loss;num_train_batches+=1;
-             if(epoch+1)%args.model_validation_freq==0:val_loss,val_metrics=validate_model(dynamic_model,val_loader,device,writer,global_step+epoch+1,"dynamic",True);print(f" DynEp {epoch+1}:TrLs={train_loss/num_train_batches if num_train_batches>0 else 0:.5f},VlLs={val_loss:.5f},VlR2={val_metrics['r2']:.3f}");if val_loss<best_val_loss-args.model_val_delta:best_val_loss=val_loss;patience_counter=0;best_dyn_state_dict=copy.deepcopy(dynamic_model.ode_func.state_dict());else:patience_counter+=args.model_validation_freq;
-             if patience_counter>=args.model_val_patience:print(f" Early stop dyn @ ep {epoch+1}.");break
-             if best_dyn_state_dict:dynamic_model.ode_func.load_state_dict(best_dyn_state_dict);print(f" Loaded best dyn model(VlLs:{best_val_loss:.5f})");final_validation_loss_state=best_val_loss
+             else:
+                 indices=torch.randperm(len(dyn_obs_t),device=device);split=int(len(dyn_obs_t)*(1-args.model_val_ratio));train_idx,val_idx=indices[:split],indices[split:];
+                 train_dataset=TensorDataset(dyn_obs_t[train_idx],dyn_acts_t[train_idx],dyn_targets_t[train_idx]);val_dataset=TensorDataset(dyn_obs_t[val_idx],dyn_acts_t[val_idx],dyn_targets_t[val_idx]);
+                 train_loader=DataLoader(train_dataset,batch_size=args.model_train_batch_size,shuffle=True);val_loader=DataLoader(val_dataset,batch_size=args.model_train_batch_size);
+                 print(f"DynModel:Tr={len(train_idx)},Vl={len(val_idx)}");best_val_loss=float('inf');patience_counter=0;dynamic_model_accurate=False;best_dyn_state_dict=None;final_model_epoch=0;dynamic_model.train()
+                 for epoch in range(args.model_max_epochs):
+                     final_model_epoch=epoch; train_loss=0; num_train_batches=0;
+                     for _ in range(args.model_updates_per_epoch):
+                         epoch_train_loss=train_model_epoch(dynamic_model,dynamics_optimizer,train_loader,device,writer,epoch,global_step,"dynamic",True);
+                         train_loss+=epoch_train_loss; num_train_batches+=1;
+                     if (epoch+1)%args.model_validation_freq==0:
+                         val_loss,val_metrics=validate_model(dynamic_model,val_loader,device,writer,global_step+epoch+1,"dynamic",True);
+                         print(f" DynEp {epoch+1}:TrLs={train_loss/num_train_batches if num_train_batches>0 else 0:.5f},VlLs={val_loss:.5f},VlR2={val_metrics['r2']:.3f}")
+                         if val_loss<best_val_loss-args.model_val_delta:
+                             best_val_loss=val_loss;patience_counter=0;best_dyn_state_dict=copy.deepcopy(dynamic_model.ode_func.state_dict());
+                         else:
+                             patience_counter+=args.model_validation_freq;
+                     if patience_counter>=args.model_val_patience:print(f" Early stop dyn @ ep {epoch+1}.");break
+                 if best_dyn_state_dict:dynamic_model.ode_func.load_state_dict(best_dyn_state_dict);print(f" Loaded best dyn model(VlLs:{best_val_loss:.5f})");final_validation_loss_state=best_val_loss
              else:print(" No improve dyn valid.");dynamic_model.eval();final_val_loss,_=validate_model(dynamic_model,val_loader,device,writer,global_step,"dynamic_final_eval",True);dynamic_model.train();final_validation_loss_state=final_val_loss
              dynamic_model.eval();_,final_val_metrics=validate_model(dynamic_model,val_loader,device,writer,global_step,"dynamic_final_metrics",True);dynamic_model.train();validation_r2_score=final_val_metrics['r2'];validation_loss_state=final_validation_loss_state;dynamic_model_accurate=(validation_loss_state<=args.dynamic_train_threshold);writer.add_scalar("losses/dynamics_model_validation_loss_final",validation_loss_state,global_step);writer.add_scalar("losses/dynamics_model_R2_final",validation_r2_score,global_step);print(f"DynModel Complete.FinalVlLs:{validation_loss_state:.5f}.FinR2:{validation_r2_score:.3f}.Acc:{dynamic_model_accurate}");writer.add_scalar("charts/dynamic_model_accurate",float(dynamic_model_accurate),global_step)
 

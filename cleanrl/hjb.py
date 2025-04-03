@@ -490,7 +490,13 @@ if __name__ == "__main__":
                     )
                     # Assuming jacrev returns shape [1, obs_dim, action_dim] for batch-1 inputs,
                     # squeeze the leading batch dimension.
-                    return jacobian_matrix.squeeze(0) # Result shape: [obs_dim, action_dim]
+                    # Ensure the output is always [obs_dim, action_dim]
+                    if jacobian_matrix.dim() > 2: # Handle potential extra batch dims from jacrev
+                        jacobian_matrix = jacobian_matrix.squeeze(0)
+                    # Add another squeeze just in case jacrev behaves differently sometimes
+                    if jacobian_matrix.dim() > 2:
+                         jacobian_matrix = jacobian_matrix.squeeze(0)
+                    return jacobian_matrix # Result shape: [obs_dim, action_dim]
 
 
                 f2_matrices = vmap(compute_jac_for_single_s)(s_norm_batch, zero_actions) # Shape: [batch, obs_dim, action_dim]

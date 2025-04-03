@@ -299,6 +299,17 @@ def validate_model(
             preds_norm = model(obs_norm, actions)
             all_preds_norm.append(preds_norm)
             all_targets_norm.append(targets_norm)
+            # Debug Print: Show first few preds vs targets for the first batch
+            if batch_idx == 0 and len(preds_norm) > 0:
+                print(f"  Debug {model_name} Val Batch 0:")
+                num_to_show = min(3, len(preds_norm))
+                if is_dynamic_model: # Next state (potentially multi-dim)
+                     print(f"    Pred Next State Norm[:{num_to_show}]:\n{preds_norm[:num_to_show].cpu().numpy()}")
+                     print(f"    Targ Next State Norm[:{num_to_show}]:\n{targets_norm[:num_to_show].cpu().numpy()}")
+                else: # Reward (scalar)
+                     print(f"    Pred Reward Norm[:{num_to_show}]: {preds_norm[:num_to_show].cpu().numpy()}")
+                     print(f"    Targ Reward Norm[:{num_to_show}]: {targets_norm[:num_to_show].cpu().numpy()}")
+
     if not all_preds_norm:
         return float("inf"), {
             "mse": float("inf"),

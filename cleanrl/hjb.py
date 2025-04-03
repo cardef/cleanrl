@@ -101,7 +101,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0): # (Same)
 
 # --- Dynamics Model (Neural ODE using TorchODE) ---
 class ODEFunc(nn.Module): # (Same)
-    def __init__(self, obs_dim, action_dim): super().__init__(); hidden_size=256; self.net=nn.Sequential(layer_init(nn.Linear(obs_dim+action_dim,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,obs_dim)),); print(f"ODEFunc: In={obs_dim+action_dim}, Out={obs_dim}")
+    def __init__(self, obs_dim, action_dim): super().__init__(); hidden_size=256; self.net=nn.Sequential(layer_init(nn.Linear(obs_dim+action_dim,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,hidden_size)), nn.SiLU(), layer_init(nn.Linear(hidden_size,obs_dim))); print(f"ODEFunc: In={obs_dim+action_dim}, Out={obs_dim}")
     def forward(self, t, x_norm, a): return self.net(torch.cat([x_norm.float(), a.float()], dim=-1))
 class DynamicModel(nn.Module): # (Same)
     def __init__(self, obs_dim, action_dim, dt: float, device: torch.device): super().__init__(); self.ode_func = ODEFunc(obs_dim, action_dim); self.dt = dt; self.device = device; if not TORCHODE_AVAILABLE: raise ImportError("torchode not found."); self.term=to.ODETerm(self.ode_func,with_args=True); self.step_method=to.Euler(term=self.term); self.step_size_controller=to.FixedStepController(); self.adjoint=to.AutoDiffAdjoint(step_method=self.step_method, step_size_controller=self.step_size_controller); print(f"DynamicModel: TorchODE (Solver: Euler, dt={self.dt})")
@@ -113,7 +113,7 @@ class DynamicModel(nn.Module): # (Same)
 # --- Agent Network Definitions ---
 # <<< Removed Actor class >>>
 class ValueNetwork(nn.Module): # Renamed from HJBCritic
-    def __init__(self, env: VecEnv): super().__init__(); obs_dim=np.array(env.observation_space.shape).prod(); self.net=nn.Sequential(nn.Linear(obs_dim,256),nn.SiLU(),nn.Linear(256,256),nn.SiLU(),nn.Linear(256,1),); print("Initialized ValueNetwork (Critic).")
+    def __init__(self, env: VecEnv): super().__init__(); obs_dim=np.array(env.observation_space.shape).prod(); self.net=nn.Sequential(nn.Linear(obs_dim,256),nn.SiLU(),nn.Linear(256,256),nn.SiLU(),nn.Linear(256,1)); print("Initialized ValueNetwork (Critic).")
     def forward(self, x_norm): return self.net(x_norm).squeeze(-1)
 
 # --- Utility Functions ---

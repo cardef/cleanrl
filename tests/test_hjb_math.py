@@ -623,3 +623,76 @@ def test_get_f1_direct(sample_data):
         f1_numerical.cpu().numpy(), f1_analytical, atol=ATOL
     ), "get_f1 output mismatch"
     print("Test get_f1 direct: PASSED")
+
+
+def test_a_star_maximizes_hamiltonian(sample_data):
+    """Verify that calculated a* maximizes the analytical Hamiltonian H(s,a)."""
+    s_np, _, s_torch, _ = sample_data
+    action_space_low_t = torch.tensor([-1.0] * ACTION_DIM, device=DEVICE)
+    action_space_high_t = torch.tensor([1.0] * ACTION_DIM, device=DEVICE)
+    action_space_low_np = action_space_low_t.cpu().numpy()
+    action_space_high_np = action_space_high_t.cpu().numpy()
+    hessian_reg = 1e-3
+    num_random_actions_to_check = 10
+
+    # --- Get Analytical Derivatives ---
+    dVdx_analytical_batch_np = dVds_analytical(s_np)
+    dVdx_analytical_batch = torch.tensor(dVdx_analytical_batch_np, device=DEVICE).float()
+    a_zeros_np = np.zeros((BATCH_SIZE, ACTION_DIM))
+    c1_analytical_batch = torch.tensor(
+        -dRda_analytical(s_np, a_zeros_np), device=DEVICE
+    ).float()
+    c2_analytical_batch = torch.tensor(
+        -d2Rda2_analytical(s_np, a_zeros_np), device=DEVICE
+    ).float()
+    f2_analytical_batch = torch.tensor(
+        f2_dummy_analytical(s_np), device=DEVICE
+    ).float()
+    f2_T_analytical_batch = torch.permute(
+        f2_analytical_batch, (0, 2, 1)
+    )
+    c2_reg_analytical = c2_analytical_batch + torch.eye(
+        ACTION_DIM, device=DEVICE
+    ) * hessian_reg
+
+    # --- Calculate a* using the function under test ---
+    a_star_calculated = calculate_a_star_quad_approx(
+        dVdx_analytical_batch,
+        f2_T_analytical_batch,
+        c1_analytical_batch,
+        c2_reg_analytical,
+        action_space_low_t,
+        action_space_high_t,
+    )
+    assert a_star_calculated is not None, "a* calculation failed unexpectedly"
+    a_star_calculated_np = a_star_calculated.cpu().numpy()
+
+    # --- Define Analytical Hamiltonian H(s, a) = R(s, a) + <dV/ds, f(s, a)> ---
+    def H_analytical(s_batch_np, a_batch_np, dVds_batch_np):
+        R_val = R_dummy_analytical(s_batch_np, a_batch_np) # [batch]
+        f_val = f_dummy_analytical(s_batch_np, a_batch_np) # [batch, obs_dim]
+        dVds_dot_f = np.einsum('bi,bi->b', dVds_batch_np, f_val) # [batch]
+        return R_val + dVds_dot_f # [batch]
+
+    # --- Calculate H(s, a*) ---
+    H_at_astar = H_analytical(s_np, a_star_calculated_np, dVdx_analytical_batch_np)
+
+    # --- Compare H(s, a*) with H(s, a_rand) for random actions ---
+    print("\nComparing H(a*) with H(a_rand):")
+    for i in range(num_random_actions_to_check):
+        # Generate random actions within bounds
+        a_rand_np = np.random.uniform(
+            low=action_space_low_np,
+            high=action_space_high_np,
+            size=(BATCH_SIZE, ACTION_DIM)
+        )
+        # Calculate H(s, a_rand)
+        H_at_rand = H_analytical(s_np, a_rand_np, dVdx_analytical_batch_np)
+
+        # Assert H(s, a*) >= H(s, a_rand)
+        assert np.all(H_at_astar >= H_at_rand - ATOL), \
+            f"H(a*) is not >= H(a_rand) for random sample {i+1}"
+        if i < 3: # Print first few comparisons for inspection
+             print(f"  Sample {i+1}: H(a*)={H_at_astar[0]:.4f}, H(a_rand)={H_at_rand[0]:.4f} (First batch element)")
+
+    print("Test a* maximizes Hamiltonian: PASSED")

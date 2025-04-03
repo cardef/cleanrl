@@ -543,6 +543,14 @@ if __name__ == "__main__":
                 return None
         return a_star
 
+    def get_f1(s_norm_batch):
+        """Computes the drift term f1(s) by evaluating the ODE func with zero action."""
+        zero_actions = torch.zeros(s_norm_batch.shape[0], action_dim, device=s_norm_batch.device)
+        # Evaluate the ODE function at t=0 with zero action
+        with torch.no_grad(): # f1 calculation should not require gradients itself
+            f1 = dynamic_model.ode_func(torch.tensor(0.0), s_norm_batch, zero_actions)
+        return f1
+
     # ========================================================================
     # <<< Main Training Loop >>>
     # ========================================================================

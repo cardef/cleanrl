@@ -25,7 +25,7 @@ from cleanrl.hjb import calculate_a_star_quad_approx
 # --- Configuration ---
 OBS_DIM = 3
 ACTION_DIM = 2
-BATCH_SIZE = 5
+BATCH_SIZE = 256
 DEVICE = torch.device("cpu")  # Tests run on CPU for simplicity
 ATOL = 1e-6  # Absolute tolerance for comparisons
 

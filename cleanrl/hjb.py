@@ -1,7 +1,7 @@
 # HJB Value Iteration with Learned Control-Affine Dynamics (Neural ODE)
-# and Quadratic Reward Approximation for Analytical Action
-# Uses Normalization, Raw Buffer Storage, Model Validation, Early Stopping.
-# --- Fix for incomplete eval_calculate_a_star_quad_approx ---
+# Assumes Quadratic Action Cost (Inferred C), No Reward Model, No Actor
+# USES RAW (UNNORMALIZED) OBSERVATIONS AND REWARDS
+# Critic Loss uses HJB residual with l(a*) inferred from buffer reward/action
 
 import os
 import random
@@ -19,34 +19,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import tyro
-
 # Removed Normal distribution import
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.tensorboard import SummaryWriter
 
 # Required imports
 from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baselines3.common.vec_env import VecEnv, VecNormalize, DummyVecEnv
-
+from stable_baselines3.common.vec_env import VecEnv, VecNormalize, DummyVecEnv # Still use VecNormalize, but disable norm
 try:
-    from torch.func import grad, vmap, jacrev, hessian  # <<< Need hessian >>>
-
-    print("Imported grad, vmap, jacrev, hessian from torch.func")
+    from torch.func import grad, vmap, jacrev
+    print("Imported grad, vmap, jacrev from torch.func")
     TORCH_FUNC_AVAILABLE = True
 except ImportError:
     try:
-        from functorch import grad, vmap, jacrev, hessian
-
-        print("Imported grad, vmap, jacrev, hessian from functorch")
+        from functorch import grad, vmap, jacrev
+        print("Imported grad, vmap, jacrev from functorch")
         TORCH_FUNC_AVAILABLE = True
     except ImportError:
-        print(
-            "WARNING: torch.func / functorch required for HJB gradients/jacobians/hessians not available."
-        )
+        print("WARNING: torch.func / functorch required for HJB gradients/jacobians not available.")
         TORCH_FUNC_AVAILABLE = False
 try:
     import torchode as to
-
     print("Imported torchode.")
     TORCHODE_AVAILABLE = True
 except ImportError:
@@ -55,34 +48,21 @@ except ImportError:
     exit()
 
 import warnings
-
-warnings.filterwarnings(
-    "ignore", category=UserWarning, module="stable_baselines3.common.buffers"
-)
+warnings.filterwarnings("ignore", category=UserWarning, module="stable_baselines3.common.buffers")
 
 
 @dataclass
 class Args:
-    exp_name: str = os.path.basename(__file__)[: -len(".py")] + "_hjb_vi_ode_quad"
-    """the name of this experiment"""
-    seed: int = 1
-    torch_deterministic: bool = True
-    cuda: bool = True
-    track: bool = False
-    wandb_project_name: str = "cleanRL"
-    wandb_entity: str = None
-    capture_video: bool = False
-    save_model: bool = True
-    upload_model: bool = False
-    hf_entity: str = ""
+    exp_name: str = os.path.basename(__file__)[: -len(".py")] + "_hjb_vi_ode_raw_user_lstar" # Updated name
+    seed: int = 1; torch_deterministic: bool = True; cuda: bool = True
+    track: bool = False; wandb_project_name: str = "cleanRL"; wandb_entity: str = None
+    capture_video: bool = False; save_model: bool = True; upload_model: bool = False; hf_entity: str = ""
 
     # Algorithm specific arguments
-    env_id: str = "InvertedPendulum-v4"
-    total_timesteps: int = 1000000  # Simpler env better for this complex method
-    learning_rate: float = 1e-3  # LR for Critic (V function)
-    buffer_size: int = int(1e6)
-    gamma: float = 0.99
-    batch_size: int = 256  # Agent update batch size
+    env_id: str = "InvertedPendulum-v4"; total_timesteps: int = 1000000
+    learning_rate: float = 1e-4 # LR for Critic (V function)
+    buffer_size: int = int(1e6); gamma: float = 0.99
+    batch_size: int = 256 # Agent update batch size
     learning_starts: int = 5000
     exploration_noise_std: float = 0.1
     grad_norm_clip: Optional[float] = 1.0
@@ -91,559 +71,185 @@ class Args:
     model_train_freq: int = 250
     model_dataset_size: int = 50_000
     dynamics_learning_rate: float = 1e-3
-    reward_learning_rate: float = 1e-3  # <<< Re-added >>>
-    dynamic_train_threshold: float = 0.01
-    reward_train_threshold: float = 0.01  # <<< Re-added >>>
-    model_val_ratio: float = 0.2
-    model_val_patience: int = 10
-    model_val_delta: float = 1e-5
-    model_max_epochs: int = 50
-    model_train_batch_size: int = 256
-    model_validation_freq: int = 5
+    dynamic_train_threshold: float = 0.01 # Threshold now applies to raw state MSE
+    model_val_ratio: float = 0.2; model_val_patience: int = 10
+    model_val_delta: float = 1e-5; model_max_epochs: int = 50
+    model_train_batch_size: int = 256; model_validation_freq: int = 5
     model_updates_per_epoch: int = 1
 
     # Model Rollout Args (Currently unused)
-    model_rollout_freq: int = 10000000
-    model_rollout_length: int = 1
-    num_model_rollout_starts: int = 0
+    model_rollout_freq: int = 10000000; model_rollout_length: int = 1; num_model_rollout_starts: int = 0
 
     # HJB Residual Args
     hjb_coef: float = 1.0
     use_hjb_loss: bool = True
     terminal_coeff: float = 1.0
-    hessian_reg: float = 0.1  # Regularization for Hessian inversion (Increased default)
-    """Regularization added to the reward Hessian before inversion."""
+    ctrl_cost_weight: Optional[float] = None # Try to infer this
+    """Weight C for the quadratic control cost term C*||a||^2 used ONLY for deriving a*."""
 
     # Env Args
-    num_envs: int = 1
-    env_dt: float = 0.02
+    num_envs: int = 1; env_dt: float = 0.02
 
     # Runtime filled
-    minibatch_size: int = field(init=False)
-    rho: float = field(init=False)
+    minibatch_size: int = field(init=False); rho: float = field(init=False)
 
 
 # --- Environment Creation ---
-def make_env(env_id, seed, idx, capture_video, run_name):  # (Same)
+def make_env(env_id, seed, idx, capture_video, run_name): # (Same)
     def thunk():
-        render_mode = "rgb_array" if capture_video and idx == 0 else None
-        try:
-            env = gym.make(env_id, render_mode=render_mode)
-        except Exception as e:
-            print(
-                f"Warning: Failed render_mode='{render_mode}'. Error: {e}. Defaulting."
-            )
-            env = gym.make(env_id)
-        if capture_video and idx == 0 and env.render_mode == "rgb_array":
-            env = gym.wrappers.RecordVideo(
-                env, f"videos/{run_name}", episode_trigger=lambda x: x % 50 == 0
-            )
-        if isinstance(env.observation_space, gym.spaces.Dict):
-            env = gym.wrappers.FlattenObservation(env)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = gym.wrappers.ClipAction(env)
-        env.action_space.seed(seed + idx)
-        return env
-
+        render_mode="rgb_array" if capture_video and idx==0 else None;
+        try: env=gym.make(env_id,render_mode=render_mode)
+        except Exception as e: print(f"Warning: Failed render_mode='{render_mode}'. Error: {e}. Defaulting."); env=gym.make(env_id)
+        if capture_video and idx==0 and env.render_mode=="rgb_array": env=gym.wrappers.RecordVideo(env,f"videos/{run_name}",episode_trigger=lambda x:x%50==0)
+        if isinstance(env.observation_space, gym.spaces.Dict): env=gym.wrappers.FlattenObservation(env)
+        env=gym.wrappers.RecordEpisodeStatistics(env); env=gym.wrappers.ClipAction(env);
+        env.action_space.seed(seed + idx); return env
     return thunk
 
-
 # --- Utilities ---
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):  # (Same)
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0): # (Same)
+    torch.nn.init.orthogonal_(layer.weight, std); torch.nn.init.constant_(layer.bias, bias_const); return layer
 
 # --- Dynamics Model (Neural ODE using TorchODE) ---
-class ODEFunc(nn.Module):  # (Same)
-    def __init__(self, obs_dim, action_dim):
-        super().__init__()
-        hidden_size = 256
-        self.net = nn.Sequential(
-            layer_init(nn.Linear(obs_dim + action_dim, hidden_size)),
-            nn.SiLU(),
-            layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.SiLU(),
-            layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.SiLU(),
-            layer_init(nn.Linear(hidden_size, obs_dim)),
-        )
-        print(f"ODEFunc: In={obs_dim+action_dim}, Out={obs_dim}")
+# Operates on RAW obs/action, predicts RAW next obs derivative
+class ODEFunc(nn.Module): # (Same)
+    def __init__(self, obs_dim, action_dim): super().__init__(); self.obs_dim=obs_dim; self.action_dim=action_dim; shared_layer_size=256; f1_layer_size=128; f2_layer_size=128; self.shared_layers=nn.Sequential(layer_init(nn.Linear(obs_dim,shared_layer_size)),nn.SiLU(),layer_init(nn.Linear(shared_layer_size,shared_layer_size)),nn.SiLU(),); self.f1_head=nn.Sequential(layer_init(nn.Linear(shared_layer_size,f1_layer_size)),nn.SiLU(),layer_init(nn.Linear(f1_layer_size,obs_dim))); self.f2_head=nn.Sequential(layer_init(nn.Linear(shared_layer_size,f2_layer_size)),nn.SiLU(),layer_init(nn.Linear(f2_layer_size,obs_dim*action_dim))); print(f"Initialized Control-Affine ODEFunc (RAW): Shared={shared_layer_size}, f1=[{obs_dim}], f2=[{obs_dim}x{action_dim}]")
+    def get_f1_f2(self, x_raw): shared_features=self.shared_layers(x_raw.float()); f1=self.f1_head(shared_features); f2_flat=self.f2_head(shared_features); f2=f2_flat.view(-1,self.obs_dim,self.action_dim); return f1, f2
+    def forward(self, t, x_raw, a_raw): f1,f2=self.get_f1_f2(x_raw); control_effect=torch.bmm(f2,a_raw.float().unsqueeze(-1)).squeeze(-1); dx_dt=f1+control_effect; return dx_dt
 
-    def forward(self, t, x_norm, a):
-        return self.net(torch.cat([x_norm.float(), a.float()], dim=-1))
-
-
-class DynamicModel(nn.Module):  # (Same)
-    def __init__(self, obs_dim, action_dim, dt: float, device: torch.device):
-        super().__init__()
-        self.ode_func = ODEFunc(obs_dim, action_dim)
-        self.dt = dt
-        self.device = device
-        if not TORCHODE_AVAILABLE:
-            raise ImportError("torchode not found.")
-        self.term = to.ODETerm(self.ode_func, with_args=True)
-        self.step_method = to.Euler(term=self.term)
-        self.step_size_controller = to.FixedStepController()
-        self.adjoint = to.AutoDiffAdjoint(
-            step_method=self.step_method, step_size_controller=self.step_size_controller
-        )
-        print(f"DynamicModel: TorchODE (Solver: Euler, dt={self.dt})")
-
-    def forward(self, initial_obs_norm, actions_norm):
-        batch_size = initial_obs_norm.shape[0]
-        dt0 = torch.full((batch_size,), self.dt / 5, device=self.device)
-        t_span_tensor = torch.tensor([0.0, self.dt], device=self.device)
-        t_eval = t_span_tensor.unsqueeze(0).repeat(batch_size, 1)
-        problem = to.InitialValueProblem(
-            y0=initial_obs_norm.float(),
-            t_eval=t_eval,
-        )
-        try:
-            sol = self.adjoint.solve(problem, args=actions_norm.float(), dt0=dt0)
-            # Check if solve was successful and returned expected shape
-            if hasattr(sol, 'ys') and sol.ys.shape[1] > 1:
-                final_state_pred_norm = sol.ys[:, 1, :]
-            else:
-                print(f"WARN: TorchODE solve did not return expected output structure. Falling back.")
-                final_state_pred_norm = initial_obs_norm # Fallback
-        except Exception as e:
-            print(f"WARN: TorchODE solve failed with error: {e}. Falling back to initial state.")
-            final_state_pred_norm = initial_obs_norm # Fallback
-
-        # Check for NaNs/Infs in the result
-        if not torch.isfinite(final_state_pred_norm).all():
-            print("WARN: NaNs or Infs detected in dynamic model prediction. Falling back to initial state.")
-            final_state_pred_norm = initial_obs_norm # Fallback
-
-        return final_state_pred_norm
-
-
-# --- Reward Model ---
-class RewardModel(nn.Module):  # Re-introduced
-    def __init__(self, obs_dim, action_dim):
-        super().__init__()
-        hidden_size = 128
-        self.net = nn.Sequential(
-            layer_init(nn.Linear(obs_dim + action_dim, hidden_size)),
-            nn.ReLU(),
-            layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.ReLU(),
-            layer_init(nn.Linear(hidden_size, 1)),
-        )
-        print(f"Initialized RewardModel: Input {obs_dim+action_dim}, Output 1")
-
-    def forward(self, obs_norm, action):
-        # Predicts normalized reward (scalar output)
-        return self.net(torch.cat([obs_norm.float(), action.float()], dim=1)).squeeze(
-            -1
-        )  # Output shape [batch]
-
+class DynamicModel(nn.Module): # (Same)
+    def __init__(self, obs_dim, action_dim, dt: float, device: torch.device): super().__init__(); self.ode_func = ODEFunc(obs_dim, action_dim); self.dt = dt; self.device = device; if not TORCHODE_AVAILABLE: raise ImportError("torchode not found."); self.term=to.ODETerm(self.ode_func,with_args=True); self.step_method=to.Euler(term=self.term); self.step_size_controller=to.FixedStepController(); self.adjoint=to.AutoDiffAdjoint(step_method=self.step_method, step_size_controller=self.step_size_controller); print(f"Initialized DynamicModel (RAW) using Control-Affine ODEFunc (Solver: Euler, dt={self.dt})")
+    def forward(self, initial_obs_raw, actions_raw): batch_size=initial_obs_raw.shape[0]; dt0=torch.full((batch_size,),self.dt/5,device=self.device); t_span_tensor=torch.tensor([0.0,self.dt],device=self.device); t_eval=t_span_tensor.unsqueeze(0).repeat(batch_size,1); problem=to.InitialValueProblem(y0=initial_obs_raw.float(),t_eval=t_eval,); t_eval_actual, sol_ys = to.odeint(self.ode_func, initial_obs_raw.float(), t_eval[0], solver=self.step_method, args=(actions_raw.float(),), dt0=dt0[0]); final_state_pred_raw=sol_ys[1]; return final_state_pred_raw
 
 # --- Agent Network Definitions ---
-class ValueNetwork(nn.Module):  # Renamed from HJBCritic
-    def __init__(self, env: VecEnv):
-        super().__init__()
-        obs_dim = np.array(env.observation_space.shape).prod()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, 256),
-            nn.SiLU(),
-            nn.Linear(256, 256),
-            nn.SiLU(),
-            nn.Linear(256, 1),
-        )
-        print("Initialized ValueNetwork (Critic).")
-
-    def forward(self, x_norm):
-        return self.net(x_norm).squeeze(-1)
-
+# Operates on RAW observations
+class ValueNetwork(nn.Module): # (Same)
+    def __init__(self, env: VecEnv): super().__init__(); obs_dim=np.array(env.observation_space.shape).prod(); self.net=nn.Sequential(nn.Linear(obs_dim,256),nn.SiLU(),nn.Linear(256,256),nn.SiLU(),nn.Linear(256,1),); print("Initialized ValueNetwork (Critic) for RAW inputs.")
+    def forward(self, x_raw): return self.net(x_raw.float()).squeeze(-1) # Predicts raw value
 
 # --- Utility Functions ---
-def calculate_metrics(preds, targets):  # (Same)
-    mse = F.mse_loss(preds, targets).item()
-    mae = F.l1_loss(preds, targets).item()
-    ss_res = torch.sum((targets - preds) ** 2)
-    ss_tot = torch.sum((targets - torch.mean(targets)) ** 2)
-    r2 = (1 - ss_res / ss_tot).item() if ss_tot > 1e-8 else -float("inf")
-    return {"mse": mse, "mae": mae, "r2": r2}
-
-
-def train_model_epoch(
-    model,
-    optimizer,
-    train_loader,
-    device,
-    writer,
-    epoch,
-    global_step,
-    model_name,
-    is_dynamic_model,
-):  # Updated
-    model.train()
-    total_loss = 0.0
-    num_batches = 0
-    for batch_idx, batch_data in enumerate(train_loader):
-        obs_norm, actions, targets_norm = [d.to(device) for d in batch_data]
-        preds_norm = model(obs_norm, actions)  # Both models take obs, action
-        loss = F.mse_loss(preds_norm, targets_norm)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-        num_batches += 1
-        if batch_idx % 50 == 0:
-            writer.add_scalar(
-                f"losses/{model_name}_batch_mse",
-                loss.item(),
-                global_step + epoch * len(train_loader) + batch_idx,
-            )
-    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-    return avg_loss
-
-
-def validate_model(
-    model, val_loader, device, writer, global_step, model_name, is_dynamic_model
-):  # Updated
-    model.eval()
-    all_preds_norm = []
-    all_targets_norm = []
+def calculate_metrics(preds, targets): # (Same)
+    mse=F.mse_loss(preds,targets).item(); mae=F.l1_loss(preds,targets).item(); ss_res=torch.sum((targets-preds)**2); ss_tot=torch.sum((targets-torch.mean(targets))**2); r2=(1-ss_res/ss_tot).item() if ss_tot>1e-8 else -float('inf'); return{"mse":mse,"mae":mae,"r2":r2}
+def train_model_epoch(model, optimizer, train_loader, device, writer, epoch, global_step, model_name, is_dynamic_model): # Operates on RAW data
+    model.train(); total_loss=0.0; num_batches=0;
+    for batch_idx,batch_data in enumerate(train_loader):
+        obs_raw, actions_raw, targets_raw = [d.to(device) for d in batch_data];
+        if is_dynamic_model: preds_raw = model(obs_raw, actions_raw)
+        else: raise ValueError("train_model_epoch called without dynamic model flag")
+        loss = F.mse_loss(preds_raw, targets_raw); optimizer.zero_grad(); loss.backward(); optimizer.step(); total_loss+=loss.item(); num_batches+=1;
+        if batch_idx%50==0: writer.add_scalar(f"losses/{model_name}_batch_mse",loss.item(),global_step+epoch*len(train_loader)+batch_idx)
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0; return avg_loss
+def validate_model(model, val_loader, device, writer, global_step, model_name, is_dynamic_model): # Operates on RAW data
+    model.eval(); all_preds_raw=[]; all_targets_raw=[];
     with torch.no_grad():
-        for batch_idx, batch_data in enumerate(val_loader): # Use enumerate
-            obs_norm, actions, targets_norm = [d.to(device) for d in batch_data]
-            preds_norm = model(obs_norm, actions)
-            all_preds_norm.append(preds_norm)
-            all_targets_norm.append(targets_norm)
-            # Debug Print: Show first few preds vs targets for the first batch
-            if batch_idx == 0 and len(preds_norm) > 0:
-                print(f"  Debug {model_name} Val Batch 0:")
-                num_to_show = min(3, len(preds_norm))
-                if is_dynamic_model: # Next state (potentially multi-dim)
-                     print(f"    Pred Next State Norm[:{num_to_show}]:\n{preds_norm[:num_to_show].cpu().numpy()}")
-                     print(f"    Targ Next State Norm[:{num_to_show}]:\n{targets_norm[:num_to_show].cpu().numpy()}")
-                else: # Reward (scalar)
-                     print(f"    Pred Reward Norm[:{num_to_show}]: {preds_norm[:num_to_show].cpu().numpy()}")
-                     print(f"    Targ Reward Norm[:{num_to_show}]: {targets_norm[:num_to_show].cpu().numpy()}")
-
-    if not all_preds_norm:
-        return float("inf"), {
-            "mse": float("inf"),
-            "mae": float("inf"),
-            "r2": -float("inf"),
-        }
-    all_preds_norm = torch.cat(all_preds_norm, dim=0)
-    all_targets_norm = torch.cat(all_targets_norm, dim=0)
-    val_metrics = calculate_metrics(all_preds_norm, all_targets_norm)
-    val_loss = val_metrics["mse"]
-    writer.add_scalar(f"losses/{model_name}_val_mse", val_metrics["mse"], global_step)
-    writer.add_scalar(f"metrics/{model_name}_val_mae", val_metrics["mae"], global_step)
-    writer.add_scalar(f"metrics/{model_name}_val_r2", val_metrics["r2"], global_step)
+        for batch_data in val_loader:
+            obs_raw, actions_raw, targets_raw = [d.to(device) for d in batch_data];
+            if is_dynamic_model: preds_raw = model(obs_raw, actions_raw)
+            else: raise ValueError("validate_model called without dynamic model flag")
+            all_preds_raw.append(preds_raw); all_targets_raw.append(targets_raw)
+    if not all_preds_raw: return float('inf'), {"mse":float('inf'),"mae":float('inf'),"r2":-float('inf')}
+    all_preds_raw=torch.cat(all_preds_raw,dim=0); all_targets_raw=torch.cat(all_targets_raw,dim=0); val_metrics=calculate_metrics(all_preds_raw,all_targets_raw); val_loss=val_metrics["mse"];
+    writer.add_scalar(f"losses/{model_name}_val_mse",val_metrics["mse"],global_step); writer.add_scalar(f"metrics/{model_name}_val_mae",val_metrics["mae"],global_step); writer.add_scalar(f"metrics/{model_name}_val_r2",val_metrics["r2"],global_step)
     return val_loss, val_metrics
-
-
-# --- Helper Functions for HJB Calculation (Module Level) ---
-def calculate_a_star_quad_approx(
-    dVdx_norm,
-    f2_transpose,
-    c1,
-    c2_reg,
-    action_space_low_t,
-    action_space_high_t,
-):
-    """
-    Calculates the optimal action a* using a quadratic approximation of the Hamiltonian.
-    a* = - c2_reg^{-1} * (c1 + f2^T * dVdx^T)
-    Clamps the result to the action space bounds.
-
-    Args:
-        dVdx_norm: Gradient of the value function w.r.t. state (batch, obs_dim).
-        f2_transpose: Transpose of the control influence matrix (batch, action_dim, obs_dim).
-        c1: Negative gradient of the reward w.r.t. action at a=0 (batch, action_dim).
-        c2_reg: Regularized negative Hessian of the reward w.r.t. action at a=0 (batch, action_dim, action_dim).
-        action_space_low_t: Lower bounds of the action space (action_dim).
-        action_space_high_t: Upper bounds of the action space (action_dim).
-
-    Returns:
-        The calculated optimal action a* (batch, action_dim), clamped to bounds.
-    Raises:
-        RuntimeError: If calculation fails due to missing inputs, dimension mismatch, or numerical issues.
-    """
-    if f2_transpose is None or c1 is None or c2_reg is None:
-        raise RuntimeError("calculate_a_star called with None inputs (f2_transpose, c1, or c2_reg).")
-
-    # Ensure consistent device and dtype
-    device = dVdx_norm.device
-    f2_transpose = f2_transpose.to(device)
-    c1 = c1.to(device)
-    c2_reg = c2_reg.to(device)
-    action_space_low_t = action_space_low_t.to(device)
-    action_space_high_t = action_space_high_t.to(device)
-
-    dVdx_col = dVdx_norm.unsqueeze(-1) # [batch, obs_dim, 1]
-    try:
-        # Calculate term H_a(0) = R_a(0) + V_s^T f2 = -c1 + dVdx^T f2
-        f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1) # [batch, action_dim]
-        term1 = -c1 + f2T_dVdx # [batch, action_dim] <--- Corrected sign for c1
-    except Exception as e:
-        print(f"ERROR: Dimension mismatch in H_a(0) calculation: {e}")
-        print(f"  f2_transpose shape: {f2_transpose.shape}")
-        print(f"  dVdx_col shape: {dVdx_col.shape}")
-        print(f"  c1 shape: {c1.shape}")
-        raise RuntimeError(f"Dimension mismatch in H_a(0) calculation: {e}")
-
-    a_star_unclamped = None
-    try:
-        # Use torch.linalg.solve: solves ax=b for x -> solve(a, b)
-        # Maximize H => a* = -H_aa(0)^-1 H_a(0) = -(-c2)^-1 (-c1 + f2^T dVdx) = c2^-1 * term1
-        # Here: c2_reg * a* = term1
-        a_star_unclamped = torch.linalg.solve(
-            c2_reg, term1.unsqueeze(-1) # b needs shape [batch, action_dim, 1] <--- Removed negative sign
-        ).squeeze(-1) # Result shape [batch, action_dim]
-    except torch.linalg.LinAlgError as e: # More specific exception
-        print(
-            f"WARN: Hessian inversion failed during a* calc: {e}. Using pseudo-inverse."
-        )
-        try:
-            c2_reg_pinv = torch.linalg.pinv(c2_reg) # [batch, action_dim, action_dim]
-            # a* = c2_pinv * term1
-            a_star_unclamped = torch.bmm(
-                c2_reg_pinv, term1.unsqueeze(-1) # [batch, action_dim, 1] <--- Removed negative sign
-            ).squeeze(-1) # Result shape [batch, action_dim]
-        except Exception as e2:
-            print(
-                f"ERROR: Hessian pseudo-inverse also failed: {e2}. Cannot compute a*."
-            )
-            raise RuntimeError(f"Hessian pseudo-inverse failed: {e2}")
-    except Exception as e_other: # Catch other potential errors
-         print(f"ERROR: Unexpected error during a* solve: {e_other}")
-         raise RuntimeError(f"Unexpected error during a* solve: {e_other}")
-
-
-    if a_star_unclamped is not None:
-        # Clamp the action to the environment's action space bounds
-        a_star_clamped = torch.clamp(a_star_unclamped, action_space_low_t, action_space_high_t)
-        # Debug: Check for NaNs
-        if torch.isnan(a_star_clamped).any():
-            print("WARN: NaN detected in calculated a_star_clamped.")
-            raise RuntimeError("NaN detected in calculated a_star_clamped.")
-        return a_star_clamped
-    else:
-        # This case should ideally not be reached if pinv fallback works
-        raise RuntimeError("a_star_unclamped is None after solve attempts.")
-
-
-def get_f1(s_norm_batch, dynamic_model_ode_func, action_dim):
-    """
-    Computes the drift term f1(s) by evaluating the ODE func with zero action.
-    Requires the dynamic model's ode_func and action_dim to be passed explicitly.
-    """
-    zero_actions = torch.zeros(s_norm_batch.shape[0], action_dim, device=s_norm_batch.device)
-    # Evaluate the ODE function at t=0 with zero action
-    with torch.no_grad(): # f1 calculation should not require gradients itself
-        f1 = dynamic_model_ode_func(torch.tensor(0.0), s_norm_batch, zero_actions)
-    return f1
-
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    if not TORCHODE_AVAILABLE:
-        exit()
-    if not TORCH_FUNC_AVAILABLE:
-        print("FATAL: torch.func or functorch required for HJB gradients.")
-        exit()
+    if not TORCHODE_AVAILABLE: exit()
+    if not TORCH_FUNC_AVAILABLE: print("FATAL: torch.func or functorch required for HJB gradients."); exit()
     args = tyro.cli(Args)
 
     # Calculate dependent args
-    if args.model_rollout_length > 0:
-        args.num_model_rollout_starts = args.num_model_rollout_starts
-    else:
-        args.num_model_rollout_starts = 0
-        print("Warning: model_rollout_length <= 0.")
+    if args.model_rollout_length > 0: args.num_model_rollout_starts = args.num_model_rollout_starts
+    else: args.num_model_rollout_starts = 0; print("Warning: model_rollout_length <= 0.")
     args.rho = -math.log(args.gamma) if args.gamma > 0 and args.gamma < 1 else 0.0
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     # --- Logging Setup ---
-    if args.track:
-        try:
-            import wandb
-
-            wandb.init(
-                project=args.wandb_project_name,
-                entity=args.wandb_entity,
-                sync_tensorboard=True,
-                config=vars(args),
-                name=run_name,
-                monitor_gym=True,
-                save_code=True,
-            )
-            print("WandB enabled.")
-        except ImportError:
-            print("WARNING: wandb not installed.")
-            args.track = False
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s"
-        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
-    print(f"Run name: {run_name}")
-    print(f"Arguments: {vars(args)}")
+    if args.track: try: import wandb; wandb.init(project=args.wandb_project_name,entity=args.wandb_entity,sync_tensorboard=True,config=vars(args),name=run_name,monitor_gym=True,save_code=True,); print("WandB enabled.") except ImportError: print("WARNING: wandb not installed.");args.track=False
+    writer = SummaryWriter(f"runs/{run_name}"); writer.add_text("hyperparameters","|param|value|\n|-|-|\n%s"%("\n".join([f"|{key}|{value}|"for key,value in vars(args).items()])))
+    print(f"Run name: {run_name}"); print(f"Arguments: {vars(args)}")
 
     # --- Seeding & Device ---
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-    print(f"Using device: {device}")
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed); torch.backends.cudnn.deterministic=args.torch_deterministic;
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu"); print(f"Using device: {device}")
 
-    # --- Environment Setup with VecNormalize ---
-    print("Setting up environment...")
-    envs = DummyVecEnv(
-        [make_env(args.env_id, args.seed, 0, args.capture_video, run_name)]
-    )
-    norm_envs = VecNormalize(
-        envs,
-        gamma=args.gamma,
-        norm_obs=False,
-        norm_reward=False,
-    )
-    print("VecNormalize enabled (Obs=True, Reward=True).")  # Keep reward norm
-    try:
-        env_dt = norm_envs.get_attr("dt")[0]
-        print(f"Detected env dt: {env_dt}")
-    except Exception:
-        print(f"Warning: Could not detect env dt. Using default: {args.env_dt}")
-        env_dt = args.env_dt
+    # --- Environment Setup without Normalization ---
+    print("Setting up environment...");
+    envs = DummyVecEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    # <<< Norm Change: Initialize VecNormalize but disable obs/reward norm >>>
+    norm_envs = VecNormalize(envs, gamma=args.gamma, norm_obs=False, norm_reward=False);
+    print("VecNormalize wrapper used, but Obs/Reward normalization DISABLED.")
+    try: env_dt = norm_envs.get_attr("dt")[0]; print(f"Detected env dt: {env_dt}")
+    except Exception: print(f"Warning: Could not detect env dt. Using default: {args.env_dt}"); env_dt=args.env_dt
     args.env_dt = env_dt
-    # ctrl_cost_weight removed from args, not needed for this version
-    obs_space = norm_envs.observation_space
-    action_space = norm_envs.action_space
-    obs_dim = np.array(obs_space.shape).prod()
-    action_dim = np.prod(action_space.shape)
-    action_space_low_t = torch.tensor(
-        action_space.low, dtype=torch.float32, device=device
-    )
-    action_space_high_t = torch.tensor(
-        action_space.high, dtype=torch.float32, device=device
-    )
+    # Infer ctrl_cost_weight
+    try: ctrl_cost_weight=norm_envs.get_attr("_ctrl_cost_weight")[0]; print(f"Detected env ctrl_cost_weight: {ctrl_cost_weight}")
+    except Exception as e: ctrl_cost_weight=0.1; print(f"Warning: Could not detect env ctrl_cost_weight ({e}). Using default: {ctrl_cost_weight}")
+    if args.ctrl_cost_weight is not None: ctrl_cost_weight=args.ctrl_cost_weight; print(f"Overriding ctrl_cost_weight with args: {ctrl_cost_weight}")
+    if ctrl_cost_weight <= 0: raise ValueError("ctrl_cost_weight must be positive.")
+    print(f"Using ctrl_cost_weight = {ctrl_cost_weight}")
+
+    # <<< Norm Change: Use raw spaces for agent/model sizing >>>
+    obs_space = norm_envs.observation_space; action_space = norm_envs.action_space
+    obs_dim = np.array(obs_space.shape).prod(); action_dim = np.prod(action_space.shape)
+    action_space_low_t = torch.tensor(action_space.low, dtype=torch.float32, device=device)
+    action_space_high_t = torch.tensor(action_space.high, dtype=torch.float32, device=device)
 
     # --- Agent, Models, Optimizers ---
-    critic = ValueNetwork(norm_envs).to(device)
-    critic_optimizer = optim.AdamW(critic.parameters(), lr=args.learning_rate)
-    dynamic_model = DynamicModel(obs_dim, action_dim, args.env_dt, device).to(device)
-    dynamics_optimizer = optim.AdamW(
-        dynamic_model.ode_func.parameters(), lr=args.dynamics_learning_rate
-    )
-    reward_model = RewardModel(obs_dim, action_dim).to(device)
-    # Re-added
-    reward_optimizer = optim.AdamW(
-        reward_model.parameters(), lr=args.reward_learning_rate
-    )
-    # Re-added
+    # <<< Norm Change: Pass raw env spaces (from norm_envs as norm is off) >>>
+    critic = ValueNetwork(norm_envs).to(device);
+    critic_optimizer = optim.AdamW(critic.parameters(), lr=args.learning_rate);
+    dynamic_model = DynamicModel(obs_dim, action_dim, args.env_dt, device).to(device);
+    dynamics_optimizer = optim.AdamW(dynamic_model.ode_func.parameters(), lr=args.dynamics_learning_rate);
 
     # --- Replay Buffer for RAW Data ---
-    raw_obs_space = norm_envs.unwrapped.observation_space
-    raw_action_space = norm_envs.unwrapped.action_space
-    raw_obs_space.dtype = np.float32
-    print(f"Replay buffer storing RAW data. Obs Shape: {raw_obs_space.shape}")
-    sb3_buffer_device = "cpu"
-    rb = ReplayBuffer(
-        args.buffer_size,
-        raw_obs_space,
-        raw_action_space,
-        device=sb3_buffer_device,
-        n_envs=args.num_envs,
-        handle_timeout_termination=True,
-    )
+    raw_obs_space = norm_envs.observation_space # Raw space is same as norm_envs space now
+    raw_action_space = norm_envs.action_space
+    raw_obs_space.dtype = np.float32; print(f"Replay buffer storing RAW data. Obs Shape: {raw_obs_space.shape}"); sb3_buffer_device="cpu";
+    rb = ReplayBuffer(args.buffer_size, raw_obs_space, raw_action_space, device=sb3_buffer_device, n_envs=args.num_envs, handle_timeout_termination=True,)
     print("Replay buffer configured with handle_timeout_termination=True")
 
     # --- Continuous Discount Rate ---
-    rho = -torch.log(torch.tensor(args.gamma, device=device))
-    print(f"Continuous discount rate (rho): {rho.item():.4f}")
+    rho = -torch.log(torch.tensor(args.gamma, device=device)); print(f"Continuous discount rate (rho): {rho.item():.4f}")
 
     # --- Training Start ---
     start_time = time.time()
     norm_envs.seed(args.seed)
-    obs = norm_envs.reset()
+    obs = norm_envs.reset() # Returns raw obs now
     obs = obs.astype(np.float32)
-    dynamic_model_accurate = False
-    reward_model_accurate = False
-    global_step = 0  # Added reward model flag
+    dynamic_model_accurate = False; global_step = 0
 
-    # --- vmap/grad/hessian/jacrev setup ---
+    # --- vmap/grad setup ---
     compute_value_grad_func = None
-    compute_reward_grad_func = None
-    compute_reward_hessian_func = None
-    compute_f_jac_func = None
-
     if args.use_hjb_loss and TORCH_FUNC_AVAILABLE:
         try:
-            # Grad V(s)
-            def compute_scalar_value_critic(s):
-                if s.dim() == 1:
-                    s = s.unsqueeze(0)
-                    return critic(s).squeeze()
-
+            # <<< Norm Change: Helper operates on raw obs >>>
+            def compute_scalar_value_critic(single_obs_raw_tensor):
+                if single_obs_raw_tensor.dim() == 1: single_obs_raw_tensor = single_obs_raw_tensor.unsqueeze(0)
+                return critic(single_obs_raw_tensor).squeeze() # Pass raw obs to critic
             compute_value_grad_func = grad(compute_scalar_value_critic)
+            print("Value gradient function for HJB created.")
+        except Exception as e: print(f"WARNING: Failed grad func creation: {e}. HJB disabled."); args.use_hjb_loss = False
+    elif args.use_hjb_loss: print("WARNING: HJB requested but torch.func unavailable. HJB disabled."); args.use_hjb_loss = False
 
-            # Grad R(s, a) w.r.t a
-            def reward_model_wrapper_for_grad(s, a):
-                if s.dim() == 1:
-                    s = s.unsqueeze(0)
-                if a.dim() == 1:
-                    a = a.unsqueeze(0)
-                return reward_model(s, a).squeeze()
+    # --- Helper Functions for a_star ---
+    def get_f1(s_raw_batch): # Takes raw state
+        with torch.no_grad(): f1_pred, _ = dynamic_model.ode_func.get_f1_f2(s_raw_batch) # Get raw f1
+        return f1_pred
 
-            compute_reward_grad_func = grad(reward_model_wrapper_for_grad, argnums=1)
+    def get_f2_transpose(s_raw_batch): # Takes raw state
+        with torch.no_grad(): _, f2 = dynamic_model.ode_func.get_f1_f2(s_raw_batch) # Raw f2 [b, o, a]
+        f2_transpose = torch.permute(f2, (0, 2, 1)) # Shape [b, a, o]
+        return f2_transpose
 
-            # Hessian R(s, a) w.r.t a
-            compute_reward_hessian_func = hessian(
-                reward_model_wrapper_for_grad, argnums=1
-            )
-
-            # Jacobian f(s, a) w.r.t a
-            func_for_jac = dynamic_model.ode_func
-            compute_jac_f_a = jacrev(func_for_jac, argnums=2)
-
-            def get_f2_transpose(s_norm_batch):
-                zero_actions = torch.zeros(
-                    s_norm_batch.shape[0], action_dim, device=s_norm_batch.device
-                )
-
-                def compute_jac_for_single_s(s_single, a_single):
-                    s_batch = s_single.unsqueeze(0)
-                    a_batch = a_single.unsqueeze(0)
-                    jacobian_matrix = compute_jac_f_a(
-                        torch.tensor(0.0), s_batch, a_batch
-                    )
-                    # jacrev output shape can be inconsistent. Aim for [obs_dim, action_dim].
-                    # Example output shapes seen: [1, obs_dim, action_dim], [obs_dim, 1, action_dim] etc.
-                    # Reshape explicitly to the target dimension.
-                    target_shape = (s_batch.shape[-1], a_batch.shape[-1]) # (obs_dim, action_dim)
-                    try:
-                        reshaped_jacobian = jacobian_matrix.reshape(target_shape)
-                    except RuntimeError as e:
-                         print(f"WARN: Could not reshape Jacobian from {jacobian_matrix.shape} to {target_shape}. Error: {e}")
-                         # Return a zero matrix of the correct shape as fallback
-                         reshaped_jacobian = torch.zeros(target_shape, device=s_batch.device, dtype=s_batch.dtype)
-                    return reshaped_jacobian # Ensure [obs_dim, action_dim]
-
-
-                f2_matrices = vmap(compute_jac_for_single_s)(s_norm_batch, zero_actions) # Expect [batch, obs_dim, action_dim]
-                f2_transpose = torch.permute(f2_matrices, (0, 2, 1)) # Shape: [batch, action_dim, obs_dim]
-                return f2_transpose
-
-            compute_f_jac_func = get_f2_transpose
-
-            print("Gradient/Jacobian/Hessian functions for HJB created.")
-
-        except Exception as e:
-            print(f"WARNING: Failed grad/jac/hess func creation: {e}. HJB disabled.")
-            args.use_hjb_loss = False
-    elif args.use_hjb_loss:
-        print("WARNING: HJB requested but torch.func unavailable. HJB disabled.")
-        args.use_hjb_loss = False
+    def calculate_a_star(dVdx_raw, f2_transpose): # Takes raw dV/dx, raw f2_T -> returns raw a*
+        if dVdx_raw is None or f2_transpose is None: return None
+        dVdx_col = dVdx_raw.unsqueeze(-1) # [b, o, 1]
+        try:
+            # a* = -1/(2*C) * f2^T * dVdx^T
+            a_star_unclamped = (-1.0 / (2.0 * ctrl_cost_weight)) * torch.bmm(f2_transpose, dVdx_col).squeeze(-1)
+            return a_star_unclamped
+        except Exception as e: print(f"ERROR calculating a_star: {e}"); return None
 
     # ========================================================================
     # <<< Main Training Loop >>>
@@ -654,862 +260,238 @@ if __name__ == "__main__":
 
         # --- Action Selection & Environment Interaction ---
         if global_step < args.learning_starts:
-            actions = np.array(
-                [norm_envs.action_space.sample() for _ in range(norm_envs.num_envs)]
-            )
+            actions = np.array([action_space.sample() for _ in range(args.num_envs)]) # Use raw action space
         else:
             with torch.no_grad():
-                obs_tensor = torch.Tensor(obs).to(device)
-                actions_star = torch.zeros(args.num_envs, action_dim).to(
-                    device
-                )  # Default
-                # Calculate a* using quadratic approximation
-                if (
-                    compute_value_grad_func is not None
-                    and compute_reward_grad_func is not None
-                    and compute_reward_hessian_func is not None
-                    and compute_f_jac_func is not None
-                ):
-                    # Removed try...except block to let errors propagate
-                    dVdx = vmap(compute_value_grad_func)(obs_tensor)
-                    f2_T = compute_f_jac_func(obs_tensor)
-                    zero_actions_obs = torch.zeros_like(actions_star)
-                    c1 = -vmap(compute_reward_grad_func)(
-                        obs_tensor, zero_actions_obs
-                    )
-                    c2 = -vmap(compute_reward_hessian_func)(
-                        obs_tensor, zero_actions_obs
-                    )
-                    c2_reg = (
-                        c2 + torch.eye(action_dim, device=device) * args.hessian_reg
-                    )
-                    # Calculate a* (now clamped inside the function)
-                    actions_star = calculate_a_star_quad_approx(
-                        dVdx,
-                        f2_T,
-                        c1,
-                        c2_reg,
-                        action_space_low_t,
-                        action_space_high_t,
-                    )
-                    # No fallback here, error will propagate if actions_star is None or calculation failed
+                obs_tensor = torch.Tensor(obs).to(device) # Raw obs tensor
+                actions_star = torch.zeros(args.num_envs, action_dim).to(device) # Default
+                if compute_value_grad_func is not None:
+                    try:
+                        dVdx = vmap(compute_value_grad_func)(obs_tensor) # Grad of raw V w.r.t raw obs
+                        f2_T = get_f2_transpose(obs_tensor) # f2(s_raw)^T
+                        if f2_T is not None:
+                            actions_star_unclamped = calculate_a_star(dVdx, f2_T) # Calculate raw a*
+                            if actions_star_unclamped is not None:
+                                actions_star = actions_star_unclamped
+                    except Exception as e:
+                        if global_step % 1000 == 0: print(f"WARN: a* calc failed in action selection: {e}")
+                        actions_star = torch.Tensor(action_space.sample()).to(device).unsqueeze(0) # Sample raw action
 
-                noise = torch.normal(
-                    0,
-                    args.exploration_noise_std,
-                    size=actions_star.shape,
-                    device=device,
-                )
+                noise = torch.normal(0, args.exploration_noise_std, size=actions_star.shape, device=device)
                 actions_noisy = actions_star + noise
-                actions_clipped = torch.max(
-                    torch.min(actions_noisy, action_space_high_t), action_space_low_t
-                )
+                actions_clipped = torch.max(torch.min(actions_noisy, action_space_high_t), action_space_low_t)
                 actions = actions_clipped.cpu().numpy()
 
-        # Step environment
-        next_obs_norm, rewards_raw, dones_combined_np, infos = norm_envs.step(
-            actions
-        )  # Get RAW reward
-        next_obs_norm = next_obs_norm.astype(np.float32)
-        rewards_raw = rewards_raw.astype(np.float32)
-        terminations = np.array(
-            [
-                infos[i].get("TimeLimit.truncated", False) == False
-                and dones_combined_np[i]
-                for i in range(args.num_envs)
-            ]
-        )
+        # <<< Norm Change: Step returns RAW obs/reward >>>
+        next_obs, rewards_raw, dones_combined_np, infos = norm_envs.step(actions) # Reward is RAW
+        next_obs = next_obs.astype(np.float32); rewards_raw = rewards_raw.astype(np.float32)
+        terminations = np.array([infos[i].get("TimeLimit.truncated", False) == False and dones_combined_np[i] for i in range(args.num_envs)])
 
-        # Log real env returns (use raw reward now)
-        if "final_info" in infos:
-            final_infos = infos["final_info"]
-        else:
-            final_infos = [i for i in infos if i is not None]
+        # Log real env returns (raw)
+        if "final_info" in infos: final_infos = infos["final_info"]
+        else: final_infos = [i for i in infos if i is not None]
         for info in final_infos:
-            if info and "episode" in info:
-                episode_info = info["episode"]
-                # Extract scalar values using .item() for formatting and logging
-                ep_ret = episode_info['r'].item()
-                ep_len = episode_info['l'].item()
-                print(
-                    f"GStep={global_step}, EpReturn={ep_ret:.2f}, EpLen={ep_len}"
-                )
-                writer.add_scalar(
-                    "charts/episodic_return", ep_ret, global_step
-                )
-                writer.add_scalar(
-                    "charts/episodic_length", ep_len, global_step
-                )
-                break
+             if info and "episode" in info:
+                  episode_info=info['episode']; print(f"GStep={global_step}, EpReturn={episode_info['r']:.2f}, EpLen={episode_info['l']}");
+                  writer.add_scalar("charts/episodic_return",episode_info['r'],global_step); writer.add_scalar("charts/episodic_length",episode_info['l'],global_step); break
 
         # Store RAW data in replay buffer
-        raw_obs = norm_envs.get_original_obs()
-        real_next_obs_raw = norm_envs.unnormalize_obs(next_obs_norm)
+        real_next_obs_raw = next_obs.copy(); # Start with the raw next_obs from step
         for idx, done in enumerate(dones_combined_np):
-            try:
-                is_truncated = infos[idx].get("TimeLimit.truncated", False)
-                if (
-                    done
-                    and is_truncated
-                    and infos[idx].get("final_observation") is not None
-                ):
-                    real_next_obs_raw[idx] = infos[idx]["final_observation"].astype(
-                        np.float32
-                    )
-            except IndexError:
-                pass
-        rb.add(
-            raw_obs, real_next_obs_raw, actions, rewards_raw, dones_combined_np, infos
-        )  # Store RAW reward
+             try:
+                 is_truncated = infos[idx].get("TimeLimit.truncated", False)
+                 if done and is_truncated and infos[idx].get("final_observation") is not None:
+                     real_next_obs_raw[idx] = infos[idx]["final_observation"].astype(np.float32)
+             except IndexError: pass
+        rb.add(obs, real_next_obs_raw, actions, rewards_raw, dones_combined_np, infos) # Store RAW obs, RAW reward
 
-        obs = next_obs_norm  # Update agent state
+        obs = next_obs # Update agent state to RAW next obs
 
         # --- Model Training/Validation (Periodic) ---
-        if (
-            global_step > args.learning_starts
-            and global_step % args.model_train_freq == 0
-        ):
-            print(f"\n--- GStep {global_step}: Checking/Training Models ---")
-            model_train_start_time = time.time()
-            buffer_data_raw_tensors = rb.sample(args.model_dataset_size, env=None)
-            obs_raw_np = buffer_data_raw_tensors.observations.cpu().numpy()
-            next_obs_raw_np = buffer_data_raw_tensors.next_observations.cpu().numpy()
-            actions_np = buffer_data_raw_tensors.actions.cpu().numpy()
-            rewards_raw_np = buffer_data_raw_tensors.rewards.cpu().numpy()
-            dones_term_only_np = buffer_data_raw_tensors.dones.cpu().numpy()
-            # Normalize states, use raw rewards for reward model target
-            obs_norm_np = norm_envs.normalize_obs(obs_raw_np)
-            next_obs_norm_np = norm_envs.normalize_obs(next_obs_raw_np)
-            obs_norm_t = torch.tensor(obs_norm_np, dtype=torch.float32).to(device)
-            next_obs_norm_target_t = torch.tensor(
-                next_obs_norm_np, dtype=torch.float32
-            ).to(device)
-            actions_t = torch.tensor(actions_np, dtype=torch.float32).to(device)
-            rewards_raw_target_t = (
-                torch.tensor(rewards_raw_np, dtype=torch.float32).to(device).squeeze(-1)
-            )
-            # Target is raw reward
-            dones_term_only_t = torch.tensor(
-                dones_term_only_np, dtype=torch.float32
-            ).to(device)
+        if global_step > args.learning_starts and global_step % args.model_train_freq == 0:
+             print(f"\n--- GStep {global_step}: Checking/Training Dynamics Model ---"); model_train_start_time=time.time();
+             buffer_data_raw_tensors = rb.sample(args.model_dataset_size, env=None) # Samples RAW tensors
+             # <<< Norm Change: Use RAW tensors directly for training/validation >>>
+             obs_raw_t = buffer_data_raw_tensors.observations.to(device)
+             next_obs_raw_t = buffer_data_raw_tensors.next_observations.to(device)
+             actions_t = buffer_data_raw_tensors.actions.to(device)
+             dones_term_only_t = buffer_data_raw_tensors.dones.to(device) # Term-only dones
 
-            # --- Dynamic Model ---
-            non_terminal_mask_dyn = dones_term_only_t.squeeze(-1) == 0
-            dyn_obs_t = obs_norm_t[non_terminal_mask_dyn]
-            dyn_acts_t = actions_t[non_terminal_mask_dyn]
-            dyn_targets_t = next_obs_norm_target_t[non_terminal_mask_dyn]
-            if len(dyn_obs_t) < 2:
-                print("Warn:Not enough samples for dyn model.")
-                dynamic_model_accurate = False
-            else:
-                indices = torch.randperm(len(dyn_obs_t), device=device)
-                split = int(len(dyn_obs_t) * (1 - args.model_val_ratio))
-                train_idx, val_idx = indices[:split], indices[split:]
-                train_dataset = TensorDataset(
-                    dyn_obs_t[train_idx],
-                    dyn_acts_t[train_idx],
-                    dyn_targets_t[train_idx],
-                )
-                val_dataset = TensorDataset(
-                    dyn_obs_t[val_idx], dyn_acts_t[val_idx], dyn_targets_t[val_idx]
-                )
-                train_loader = DataLoader(
-                    train_dataset, batch_size=args.model_train_batch_size, shuffle=True
-                )
-                val_loader = DataLoader(
-                    val_dataset, batch_size=args.model_train_batch_size
-                )
-                print(f"DynModel:Tr={len(train_idx)},Vl={len(val_idx)}")
-                best_val_loss = float("inf")
-                patience_counter = 0
-                dynamic_model_accurate = False
-                best_dyn_state_dict = None
-                final_model_epoch = 0
-                dynamic_model.train()
-                for epoch in range(args.model_max_epochs):
-                    final_model_epoch = epoch
-                    train_loss = 0
-                    num_train_batches = 0
-                    for _ in range(args.model_updates_per_epoch):
-                        epoch_train_loss = train_model_epoch(
-                            dynamic_model,
-                            dynamics_optimizer,
-                            train_loader,
-                            device,
-                            writer,
-                            epoch,
-                            global_step,
-                            "dynamic",
-                            True,
-                        )
-                        train_loss += epoch_train_loss
-                        num_train_batches += 1
-                    if (epoch + 1) % args.model_validation_freq == 0:
-                        val_loss, val_metrics = validate_model(
-                            dynamic_model,
-                            val_loader,
-                            device,
-                            writer,
-                            global_step + epoch + 1,
-                            "dynamic",
-                            True,
-                        )
-                        print(
-                            f" DynEp {epoch+1}:TrLs={train_loss/num_train_batches if num_train_batches>0 else 0:.5f},VlLs={val_loss:.5f},VlR2={val_metrics['r2']:.3f}"
-                        )
-                        if val_loss < best_val_loss - args.model_val_delta:
-                            best_val_loss = val_loss
-                            patience_counter = 0
-                            best_dyn_state_dict = copy.deepcopy(
-                                dynamic_model.ode_func.state_dict()
-                            )
-                        else:
-                            patience_counter += args.model_validation_freq
-                        if patience_counter >= args.model_val_patience:
-                            print(f" Early stop dyn @ ep {epoch+1}.")
-                            break
-                if best_dyn_state_dict:
-                    dynamic_model.ode_func.load_state_dict(best_dyn_state_dict)
-                    print(f" Loaded best dyn model(VlLs:{best_val_loss:.5f})")
-                    final_validation_loss_state = best_val_loss
-                else:
-                    print(" No improve dyn valid.")
-                    dynamic_model.eval()
-                    final_val_loss, _ = validate_model(
-                        dynamic_model,
-                        val_loader,
-                        device,
-                        writer,
-                        global_step,
-                        "dynamic_final_eval",
-                        True,
-                    )
-                    dynamic_model.train()
-                    final_validation_loss_state = final_val_loss
-                dynamic_model.eval()
-                _, final_val_metrics = validate_model(
-                    dynamic_model,
-                    val_loader,
-                    device,
-                    writer,
-                    global_step,
-                    "dynamic_final_metrics",
-                    True,
-                )
-                dynamic_model.train()
-                validation_r2_score = final_val_metrics["r2"]
-                validation_loss_state = final_validation_loss_state
-                dynamic_model_accurate = (
-                    validation_loss_state <= args.dynamic_train_threshold
-                )
-                writer.add_scalar(
-                    "losses/dynamics_model_validation_loss_final",
-                    validation_loss_state,
-                    global_step,
-                )
-                writer.add_scalar(
-                    "losses/dynamics_model_R2_final", validation_r2_score, global_step
-                )
-                print(
-                    f"DynModel Complete.FinalVlLs:{validation_loss_state:.5f}.FinR2:{validation_r2_score:.3f}.Acc:{dynamic_model_accurate}"
-                )
-                writer.add_scalar(
-                    "charts/dynamic_model_accurate",
-                    float(dynamic_model_accurate),
-                    global_step,
-                )
+             # Train/Validate Dynamics Model only (using RAW data)
+             non_terminal_mask_dyn=dones_term_only_t.squeeze(-1)==0
+             dyn_obs_t=obs_raw_t[non_terminal_mask_dyn]; dyn_acts_t=actions_t[non_terminal_mask_dyn]; dyn_targets_t=next_obs_raw_t[non_terminal_mask_dyn]; # Target is raw next_obs
+             if len(dyn_obs_t)<2: print("Warn:Not enough samples for dyn model."); dynamic_model_accurate=False
+             else:
+                 indices=torch.randperm(len(dyn_obs_t),device=device);split=int(len(dyn_obs_t)*(1-args.model_val_ratio));train_idx,val_idx=indices[:split],indices[split:]; train_dataset=TensorDataset(dyn_obs_t[train_idx],dyn_acts_t[train_idx],dyn_targets_t[train_idx]);val_dataset=TensorDataset(dyn_obs_t[val_idx],dyn_acts_t[val_idx],dyn_targets_t[val_idx]); train_loader=DataLoader(train_dataset,batch_size=args.model_train_batch_size,shuffle=True);val_loader=DataLoader(val_dataset,batch_size=args.model_train_batch_size); print(f"DynModel:Tr={len(train_idx)},Vl={len(val_idx)}");best_val_loss=float('inf');patience_counter=0;dynamic_model_accurate=False;best_dyn_state_dict=None;final_model_epoch=0;dynamic_model.train()
+                 for epoch in range(args.model_max_epochs):
+                     final_model_epoch=epoch; train_loss=0; num_train_batches=0;
+                     for _ in range(args.model_updates_per_epoch): epoch_train_loss=train_model_epoch(dynamic_model,dynamics_optimizer,train_loader,device,writer,epoch,global_step,"dynamic",True); train_loss+=epoch_train_loss; num_train_batches+=1;
+                     if (epoch+1)%args.model_validation_freq==0:
+                         val_loss,val_metrics=validate_model(dynamic_model,val_loader,device,writer,global_step+epoch+1,"dynamic",True); print(f" DynEp {epoch+1}:TrLs={train_loss/num_train_batches if num_train_batches>0 else 0:.5f},VlLs={val_loss:.5f},VlR2={val_metrics['r2']:.3f}")
+                         if val_loss<best_val_loss-args.model_val_delta: best_val_loss=val_loss;patience_counter=0;best_dyn_state_dict=copy.deepcopy(dynamic_model.ode_func.state_dict());
+                         else: patience_counter+=args.model_validation_freq;
+                         if patience_counter>=args.model_val_patience: print(f" Early stop dyn @ ep {epoch+1}."); break
+                 if best_dyn_state_dict: dynamic_model.ode_func.load_state_dict(best_dyn_state_dict); print(f" Loaded best dyn model(VlLs:{best_val_loss:.5f})"); final_validation_loss_state = best_val_loss
+                 else: print(" No improve dyn valid."); dynamic_model.eval(); final_val_loss, _ = validate_model(dynamic_model, val_loader, device, writer, global_step, "dynamic_final_eval", True); dynamic_model.train(); final_validation_loss_state = final_val_loss
+                 dynamic_model.eval(); _, final_val_metrics = validate_model(dynamic_model, val_loader, device, writer, global_step, "dynamic_final_metrics", True); dynamic_model.train(); validation_r2_score = final_val_metrics['r2']; validation_loss_state = final_validation_loss_state; dynamic_model_accurate=(validation_loss_state <= args.dynamic_train_threshold); # Threshold might need adjustment for raw MSE
+                 writer.add_scalar("losses/dynamics_model_validation_loss_final", validation_loss_state, global_step); writer.add_scalar("losses/dynamics_model_R2_final", validation_r2_score, global_step); print(f"DynModel Complete.FinalVlLs:{validation_loss_state:.5f}.FinR2:{validation_r2_score:.3f}.Acc:{dynamic_model_accurate}"); writer.add_scalar("charts/dynamic_model_accurate", float(dynamic_model_accurate), global_step)
+             print(f"--- Model Check/Training Finished ---"); model_train_time = time.time() - model_train_start_time; writer.add_scalar("perf/model_train_time", model_train_time, global_step)
 
-            # --- Reward Model ---
-            rew_obs_t = obs_norm_t
-            rew_acts_t = actions_t
-            rew_targets_t = rewards_raw_target_t
-            # Target is RAW reward
-            if len(rew_obs_t) < 2:
-                print("Warn:Not enough samples for rew model.")
-                reward_model_accurate = False
-            else:
-                indices = torch.randperm(len(rew_obs_t), device=device)
-                split = int(len(rew_obs_t) * (1 - args.model_val_ratio))
-                train_idx, val_idx = indices[:split], indices[split:]
-                train_dataset = TensorDataset(
-                    rew_obs_t[train_idx],
-                    rew_acts_t[train_idx],
-                    rew_targets_t[train_idx],
-                )
-                val_dataset = TensorDataset(
-                    rew_obs_t[val_idx], rew_acts_t[val_idx], rew_targets_t[val_idx]
-                )
-                train_loader = DataLoader(
-                    train_dataset, batch_size=args.model_train_batch_size, shuffle=True
-                )
-                val_loader = DataLoader(
-                    val_dataset, batch_size=args.model_train_batch_size
-                )
-                print(f"RewModel:Tr={len(train_idx)},Vl={len(val_idx)}")
-                best_val_loss = float("inf")
-                patience_counter = 0
-                reward_model_accurate = False
-                best_rew_state_dict = None
-                final_model_epoch = 0
-                reward_model.train()
-                for epoch in range(args.model_max_epochs):
-                    final_model_epoch = epoch
-                    train_loss = 0
-                    num_train_batches = 0
-                    for _ in range(args.model_updates_per_epoch):
-                        epoch_train_loss = train_model_epoch(
-                            reward_model,
-                            reward_optimizer,
-                            train_loader,
-                            device,
-                            writer,
-                            epoch,
-                            global_step,
-                            "reward",
-                            False,
-                        )
-                        train_loss += epoch_train_loss
-                        num_train_batches += 1
-                    if (epoch + 1) % args.model_validation_freq == 0:
-                        val_loss, val_metrics = validate_model(
-                            reward_model,
-                            val_loader,
-                            device,
-                            writer,
-                            global_step + epoch + 1,
-                            "reward",
-                            False,
-                        )
-                        print(
-                            f" RewEp {epoch+1}:TrLs={train_loss/num_train_batches if num_train_batches>0 else 0:.5f},VlLs={val_loss:.5f},VlR2={val_metrics['r2']:.3f}"
-                        )
-                        if val_loss < best_val_loss - args.model_val_delta:
-                            best_val_loss = val_loss
-                            patience_counter = 0
-                            best_rew_state_dict = copy.deepcopy(
-                                reward_model.state_dict()
-                            )
-                        else:
-                            patience_counter += args.model_validation_freq
-                        if patience_counter >= args.model_val_patience:
-                            print(f" Early stop rew @ ep {epoch+1}.")
-                            break
-                if best_rew_state_dict:
-                    reward_model.load_state_dict(best_rew_state_dict)
-                    print(f" Loaded best rew model(VlLs:{best_val_loss:.5f})")
-                    final_validation_loss_reward = best_val_loss
-                else:
-                    print(" No improve rew valid.")
-                    reward_model.eval()
-                    final_val_loss, _ = validate_model(
-                        reward_model,
-                        val_loader,
-                        device,
-                        writer,
-                        global_step,
-                        "reward_final_eval",
-                        False,
-                    )
-                    reward_model.train()
-                    final_validation_loss_reward = final_val_loss
-                reward_model.eval()
-                _, final_val_metrics = validate_model(
-                    reward_model,
-                    val_loader,
-                    device,
-                    writer,
-                    global_step,
-                    "reward_final_metrics",
-                    False,
-                )
-                reward_model.train()
-                validation_loss_reward = final_validation_loss_reward
-                validation_r2_score_reward = final_val_metrics["r2"]
-                reward_model_accurate = (
-                    validation_loss_reward <= args.reward_train_threshold
-                )
-                # Threshold check on raw reward MSE might need tuning
-                writer.add_scalar(
-                    "losses/reward_model_validation_loss_final",
-                    validation_loss_reward,
-                    global_step,
-                )
-                writer.add_scalar(
-                    "losses/reward_model_R2_final",
-                    validation_r2_score_reward,
-                    global_step,
-                )
-                print(
-                    f"RewModel Complete.FinalVlLs:{validation_loss_reward:.5f}.FinR2:{validation_r2_score_reward:.3f}.Acc:{reward_model_accurate}"
-                )
-                writer.add_scalar(
-                    "charts/reward_model_accurate",
-                    float(reward_model_accurate),
-                    global_step,
-                )
-            print(f"--- Model Check/Training Finished ---")
-            model_train_time = time.time() - model_train_start_time
-            writer.add_scalar("perf/model_train_time", model_train_time, global_step)
 
         # --- Phase 3: Model Rollout Generation ---
         # (Disabled)
 
         # --- Agent Training (Value Network Only) ---
         if global_step > args.learning_starts:
-            proceed_with_update = True  # Removed gating
-            if not dynamic_model_accurate:  # Only check dynamics accuracy now
-                if global_step % 1000 == 0:
-                    print(
-                        f"Info: Proceeding with agent update step {global_step}, but dynamics model INACCURATE"
-                    )
+            proceed_with_update = True # Removed gating
+            if not dynamic_model_accurate: # Only check dynamics accuracy now
+                 if global_step % 1000 == 0: print(f"Info: Proceeding with agent update step {global_step}, but dynamics model INACCURATE")
 
             if proceed_with_update:
-                data = rb.sample(
-                    args.batch_size, env=None
-                )  # Samples Tensors: raw data + term-only dones
-                # Convert raw Tensors -> NumPy -> Normalize (OBS ONLY) -> Normalized Tensors
-                obs_raw_np = data.observations.cpu().numpy()
-                actions_np = data.actions.cpu().numpy()
-                rewards_raw_np = data.rewards.cpu().numpy()
-                dones_term_only_np = data.dones.cpu().numpy()
-                obs_norm_np = norm_envs.normalize_obs(obs_raw_np)
-                mb_obs = torch.tensor(obs_norm_np, dtype=torch.float32).to(device)
-                mb_actions = torch.tensor(actions_np, dtype=torch.float32).to(
-                    device
-                )  # Use RAW actions from buffer
-                mb_rewards_raw = (
-                    torch.tensor(rewards_raw_np, dtype=torch.float32)
-                    .to(device)
-                    .squeeze(-1)
-                )  # Use RAW reward [batch]
-                mb_dones = (
-                    torch.tensor(dones_term_only_np, dtype=torch.float32)
-                    .to(device)
-                    .squeeze(-1)
-                )  # Term-only dones [batch]
+                data = rb.sample(args.batch_size, env=None) # Samples Tensors: raw data + term-only dones
+                # <<< Norm Change: Use RAW tensors directly >>>
+                mb_obs = data.observations.to(device)
+                mb_actions = data.actions.to(device) # Raw actions from buffer
+                mb_rewards_raw = data.rewards.to(device).squeeze(-1) # Use RAW reward [batch]
+                # mb_next_obs = data.next_observations.to(device) # Raw next obs (needed for TD target if used)
+                mb_dones = data.dones.to(device).squeeze(-1) # Term-only dones [batch]
 
                 # --- Critic Update ---
-                terminations_mask = mb_dones.bool()
-                non_terminations_mask = ~terminations_mask
+                terminations_mask = mb_dones.bool(); non_terminations_mask = ~terminations_mask
                 mb_obs_critic = mb_obs.clone().requires_grad_(True)
-                all_current_v = critic(mb_obs_critic)  # V is value of normalized state
+                all_current_v = critic(mb_obs_critic) # V is value of raw state
 
                 # A. Terminal State Loss: V(s_term) = 0
-                v_term = all_current_v[terminations_mask]
-                terminal_critic_loss = torch.tensor(0.0, device=device)
-                if v_term.numel() > 0:
-                    terminal_critic_loss = F.mse_loss(v_term, torch.zeros_like(v_term))
+                v_term=all_current_v[terminations_mask]; terminal_critic_loss=torch.tensor(0.0,device=device)
+                if v_term.numel()>0: terminal_critic_loss=F.mse_loss(v_term,torch.zeros_like(v_term))
 
                 # B. Non-Terminal State Loss (HJB)
-                hjb_loss_non_term = torch.tensor(0.0, device=device)
-                hjb_calculation_successful = False # Flag to track success
-                if (
-                    non_terminations_mask.any()
-                    and args.use_hjb_loss
-                    and compute_value_grad_func is not None
-                    and compute_reward_grad_func is not None
-                    and compute_reward_hessian_func is not None
-                    and compute_f_jac_func is not None
-                ):
-
+                hjb_loss_non_term=torch.tensor(0.0,device=device)
+                if non_terminations_mask.any() and args.use_hjb_loss and compute_value_grad_func is not None:
                     obs_non_term = mb_obs_critic[non_terminations_mask]
                     v_non_term = all_current_v[non_terminations_mask]
-                    actions_buffer_raw = mb_actions[
-                        non_terminations_mask
-                    ]  # Raw actions from buffer
-                    rewards_buffer_raw = mb_rewards_raw[
-                        non_terminations_mask
-                    ]  # Raw rewards from buffer
+                    actions_buffer_raw_non_term = mb_actions[non_terminations_mask] # Raw actions from buffer
+                    rewards_buffer_raw_non_term = mb_rewards_raw[non_terminations_mask] # Raw rewards from buffer
 
-                    # Calculate dV/dx, f1, f2, c1, c2, a*
-                    # Removed outer try...except block for HJB calculation
-                    dVdx_non_term = vmap(compute_value_grad_func)(obs_non_term)
-                    # Pass dynamic_model.ode_func and action_dim to get_f1
-                    f1_non_term = get_f1(obs_non_term, dynamic_model.ode_func, action_dim)  # f1(s_norm)
-                    f2_T_non_term = compute_f_jac_func(obs_non_term)  # f2(s_norm)^T
+                    # Calculate dV/dx (raw), f1 (raw), f2 (raw), a* (raw)
+                    try:
+                        dVdx_raw = vmap(compute_value_grad_func)(obs_non_term) # Grad w.r.t. s_raw
+                        with torch.no_grad(): # f1, f2 don't need grads for critic loss
+                             f1_raw, f2_raw = dynamic_model.ode_func.get_f1_f2(obs_non_term) # Operate on raw state
+                             f2_T_raw = torch.permute(f2_raw, (0, 2, 1))
 
-                    zero_actions_non_term = torch.zeros_like(
-                        actions_buffer_raw
-                    )  # Use actions_buffer_raw shape
-                    c1 = -vmap(compute_reward_grad_func)(
-                        obs_non_term, zero_actions_non_term
-                    )  # -grad_a R(s_norm, 0)
-                    c2 = -vmap(compute_reward_hessian_func)(
-                        obs_non_term, zero_actions_non_term
-                    )  # -hess_aa R(s_norm, 0)
-                    c2_reg = (
-                        c2 + torch.eye(action_dim, device=device) * args.hessian_reg
-                    )  # Regularize Hessian
+                        if f2_T_raw is not None:
+                            # Calculate UNCLAMPED optimal action a*(s_raw)
+                            a_star_non_term = calculate_a_star(dVdx_raw, f2_T_raw) # Use helper
 
-                    if (
-                        f2_T_non_term is not None
-                        and c1 is not None
-                        and c2_reg is not None
-                    ):
-                        # Calculate a* (now clamped inside the function)
-                        a_star_non_term = calculate_a_star_quad_approx(
-                            dVdx_non_term,
-                            f2_T_non_term,
-                            c1,
-                            c2_reg,
-                            action_space_low_t,
-                            action_space_high_t,
-                        )
+                            if a_star_non_term is not None:
+                                # <<< Change: Calculate HJB residual using analytical form with raw values >>>
+                                # residual = ( <dV/dx, f1> - C*||a*||^2 - l_state ) - rho*V
+                                # Estimate raw l_state = -r_state ≈ -(r_raw + C*||a_buffer||^2)
+                                l_state_raw_approx = -rewards_buffer_raw_non_term - ctrl_cost_weight * torch.sum(actions_buffer_raw_non_term**2, dim=1) # Uses raw r and raw a
 
-                        if a_star_non_term is not None:
-                                # Debug Print: Show norms of inputs to a* calc
-                                if global_step % 1000 == 0: # Print occasionally
-                                    print(f"  Debug GStep {global_step} - a* Input Norms:")
-                                    print(f"    ||dVdx||: {torch.linalg.norm(dVdx_non_term).item():.4f}")
-                                    print(f"    ||f2_T||: {torch.linalg.norm(f2_T_non_term).item():.4f}")
-                                    print(f"    ||c1||:   {torch.linalg.norm(c1).item():.4f}")
-                                    print(f"    ||c2_reg||:{torch.linalg.norm(c2_reg).item():.4f}")
-                                # Debug Print: Show first few a* values (Now prints every time)
-                                num_to_show = min(3, len(a_star_non_term))
-                                print(f"  Debug GStep {global_step} - Calculated a*[:{num_to_show}]:\n{a_star_non_term[:num_to_show].detach().cpu().numpy()}")
+                                # Calculate quadratic cost term C*||a*||^2 (using raw a*)
+                                a_star_cost_term = ctrl_cost_weight * torch.sum(a_star_non_term**2, dim=1)
 
-                                # Calculate H(a*) = R(s, a*) + <dVdx, f(s, a*)> using learned models
-                                # NOTE: We use the *clamped* a_star here for H calculation
+                                # Calculate <dVdx, f1> term (all raw)
+                                dvdx_f1_term = torch.einsum("bi,bi->b", dVdx_raw, f1_raw)
 
-                                # Ensure models are in eval mode if not training them here
-                                dynamic_model.eval()
-                                reward_model.eval()
+                                # HJB residual based on l_state estimate (all raw)
+                                # Note the sign: HJB is rho*V = l_state + <dV/dx, f1> - C*||a*||^2
+                                # Residual = ( l_state_raw + dvdx_f1_term - a_star_cost_term ) - rho * v_non_term
+                                hjb_residual = (l_state_raw_approx + dvdx_f1_term - a_star_cost_term) - rho * v_non_term
 
-                                # Need f(s, a*) = f1 + f2 * a*
-                                # f1_non_term and f2_T_non_term were calculated outside no_grad
-                                f_star_non_term = f1_non_term + torch.bmm(
-                                    torch.permute(f2_T_non_term, (0, 2, 1)), # [b, obs, act]
-                                    a_star_non_term.unsqueeze(-1), # [b, act, 1]
-                                ).squeeze(-1) # [b, obs]
-                                # Need R(s, a*) - predict using reward model (predicts raw reward)
-                                r_star_non_term = reward_model(
-                                    obs_non_term, a_star_non_term
-                                )
-
-                                # Restore train mode if they were training
-                                # dynamic_model.train() # Not needed as models are only trained periodically
-                                # reward_model.train()
-
-                                # Calculate Hamiltonian. dVdx_non_term MUST retain grads to critic.
-                                hamiltonian_star = r_star_non_term.detach() + torch.einsum(
-                                    "bi,bi->b", dVdx_non_term, f_star_non_term.detach() # Detach f* only
-                                )
-
-                                # HJB residual: H(a*) - rho * V
-                                hjb_residual = hamiltonian_star - rho * v_non_term
                                 hjb_loss_non_term = 0.5 * (hjb_residual**2).mean()
-                                hjb_calculation_successful = True # Mark as successful
-                        else: # Corrected indentation
-                            print(
-                                f"WARN GStep {global_step}: HJB skipped due to a* calculation failure."
-                            )
-                    else:
-                        print(
-                            f"WARN GStep {global_step}: HJB skipped due to f2/c1/c2 calculation failure."
-                            )
-                    # No except block here, errors will propagate
+                            else: print("WARN: HJB skipped due to a* calculation failure.")
+                        else: print("WARN: HJB skipped due to f2 calculation failure.")
+                    except Exception as e: print(f"HJB Error:{e}"); hjb_loss_non_term=torch.tensor(0.0,device=device)
 
                 # C. Total Critic Loss & Update
-                skip_critic_update = False
-                if args.use_hjb_loss and non_terminations_mask.any() and not hjb_calculation_successful:
-                    print(f"WARN GStep {global_step}: Skipping critic update due to HJB calculation failure.")
-                    skip_critic_update = True
-
-                critic_loss = (
-                    args.hjb_coef * hjb_loss_non_term
-                    + args.terminal_coeff * terminal_critic_loss
-                )
-
-                if not skip_critic_update:
-                    critic_optimizer.zero_grad()
-                    critic_loss.backward()
-                    if args.grad_norm_clip is not None:
-                        nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
-                    critic_optimizer.step()
-                else:
-                    # Ensure gradients are cleared even if update is skipped
-                    critic_optimizer.zero_grad()
+                critic_loss = args.hjb_coef * hjb_loss_non_term + args.terminal_coeff * terminal_critic_loss
+                critic_optimizer.zero_grad();
+                critic_loss.backward()
+                if args.grad_norm_clip is not None: nn.utils.clip_grad_norm_(critic.parameters(), args.grad_norm_clip)
+                critic_optimizer.step()
 
                 # Logging Critic losses
                 writer.add_scalar("losses/critic_loss", critic_loss.item(), global_step)
-                writer.add_scalar(
-                    "losses/critic_terminal", terminal_critic_loss.item(), global_step
-                )
-                writer.add_scalar(
-                    "losses/critic_hjb_non_term", hjb_loss_non_term.item(), global_step
-                )
-                writer.add_scalar(
-                    "metrics/critic_value_mean",
-                    all_current_v.mean().item(),
-                    global_step,
-                )
+                writer.add_scalar("losses/critic_terminal", terminal_critic_loss.item(), global_step)
+                writer.add_scalar("losses/critic_hjb_non_term", hjb_loss_non_term.item(), global_step)
+                writer.add_scalar("metrics/critic_value_mean", all_current_v.mean().item(), global_step)
 
         # Log SPS occasionally
         if global_step > 0 and global_step % 1000 == 0:
-            sps = int(global_step / (time.time() - start_time))
-            print(f"GStep: {global_step}, SPS: {sps}")
-            writer.add_scalar("charts/SPS", sps, global_step)
+             sps = int(global_step / (time.time() - start_time)); print(f"GStep: {global_step}, SPS: {sps}"); writer.add_scalar("charts/SPS", sps, global_step)
 
     # --- End of Training Loop ---
     # --- Saving & Evaluation ---
     critic_final = critic
+    if args.save_model:run_folder=f"runs/{run_name}";os.makedirs(run_folder,exist_ok=True);
+    critic_model_path = f"{run_folder}/{args.exp_name}_critic.cleanrl_model"; torch.save(critic_final.state_dict(), critic_model_path); print(f"Critic saved: {critic_model_path}");
+    dynamics_ode_path = f"{run_folder}/{args.exp_name}_dynamics_odefunc.cleanrl_model"; torch.save(dynamic_model.ode_func.state_dict(), dynamics_ode_path); print(f"Dynamics ODEFunc saved: {dynamics_ode_path}");
+    # <<< Norm Change: No VecNormalize stats to save >>>
+    # norm_stats_path = f"{run_folder}/{args.exp_name}_vecnormalize.pkl"; norm_envs.save(norm_stats_path); print(f"Normalization stats saved: {norm_stats_path}");
     if args.save_model:
-        run_folder = f"runs/{run_name}"
-        os.makedirs(run_folder, exist_ok=True)
-    critic_model_path = f"{run_folder}/{args.exp_name}_critic.cleanrl_model"
-    torch.save(critic_final.state_dict(), critic_model_path)
-    print(f"Critic saved: {critic_model_path}")
-    dynamics_ode_path = f"{run_folder}/{args.exp_name}_dynamics_odefunc.cleanrl_model"
-    torch.save(dynamic_model.ode_func.state_dict(), dynamics_ode_path)
-    print(f"Dynamics ODEFunc saved: {dynamics_ode_path}")
-    reward_model_path = f"{run_folder}/{args.exp_name}_reward_model.cleanrl_model"
-    torch.save(reward_model.state_dict(), reward_model_path)
-    print(f"Reward model saved: {reward_model_path}")
-    norm_stats_path = f"{run_folder}/{args.exp_name}_vecnormalize.pkl"
-    norm_envs.save(norm_stats_path)
-    print(f"Normalization stats saved: {norm_stats_path}")
-    if args.save_model:
-        print("\nEvaluating agent performance...")
-        eval_episodes = 10
-        eval_seeds = range(args.seed + 100, args.seed + 100 + eval_episodes)
-        eval_returns_raw = []
-        # Evaluation needs policy derived from V and models
-        eval_critic = ValueNetwork(norm_envs).to(device)
-        eval_critic.load_state_dict(torch.load(critic_model_path, map_location=device))
-        eval_critic.eval()
-        eval_dynamic_model = DynamicModel(obs_dim, action_dim, args.env_dt, device).to(
-            device
-        )
-        eval_dynamic_model.ode_func.load_state_dict(
-            torch.load(dynamics_ode_path, map_location=device)
-        )
-        eval_dynamic_model.eval()
-        # <<< Re-add reward model loading for eval if needed by H? Not needed for a* >>>
-        eval_reward_model = RewardModel(obs_dim, action_dim).to(device)
-        eval_reward_model.load_state_dict(
-            torch.load(reward_model_path, map_location=device)
-        )
-        eval_reward_model.eval()
-
-        # Need grad/jac/hess functions for eval critic/models
-        eval_compute_value_grad_func = None
-        eval_get_f2_transpose = None
-        eval_calculate_a_star_quad_approx = None
-        eval_compute_reward_grad_func = None
-        eval_compute_reward_hessian_func = None
+        print("\nEvaluating agent performance...");eval_episodes=10;eval_seeds=range(args.seed+100,args.seed+100+eval_episodes);eval_returns_raw=[]
+        # <<< Norm Change: Evaluation uses raw env >>>
+        eval_critic = ValueNetwork(envs).to(device); # Pass raw env space info
+        eval_critic.load_state_dict(torch.load(critic_model_path, map_location=device)); eval_critic.eval()
+        eval_dynamic_model = DynamicModel(obs_dim, action_dim, args.env_dt, device).to(device);
+        eval_dynamic_model.ode_func.load_state_dict(torch.load(dynamics_ode_path, map_location=device)); eval_dynamic_model.eval()
+        # Need grad function for eval critic (operating on raw data)
+        eval_compute_value_grad_func = None; eval_get_f2_transpose = None; eval_calculate_a_star = None
         if TORCH_FUNC_AVAILABLE:
-            try:
+             try:
+                 def eval_compute_scalar_value_critic(s): # Takes raw state
+                      if s.dim()==1: s=s.unsqueeze(0); return eval_critic(s).squeeze()
+                 eval_compute_value_grad_func = grad(eval_compute_scalar_value_critic)
 
-                def eval_compute_scalar_value_critic(s):
-                    if s.dim() == 1:
-                        s = s.unsqueeze(0)
-                        return eval_critic(s).squeeze()
+                 def eval_get_f2_transpose(s_raw_batch): # Takes raw state
+                      with torch.no_grad(): _, f2_eval = eval_dynamic_model.ode_func.get_f1_f2(s_raw_batch)
+                      return torch.permute(f2_eval, (0,2,1))
 
-                eval_compute_value_grad_func = grad(eval_compute_scalar_value_critic)
+                 def eval_calculate_a_star(dVdx_raw, f2_transpose): # Takes raw gradient
+                     if f2_transpose is None: return None
+                     dVdx_col = dVdx_raw.unsqueeze(-1)
+                     a_star_unclamped = (-1.0/(2.0*ctrl_cost_weight))*torch.bmm(f2_transpose,dVdx_col).squeeze(-1)
+                     return a_star_unclamped # Return unclamped
 
-                def eval_dynamic_ode_func_wrapper(t, s, a):
-                    return eval_dynamic_model.ode_func(t, s, a)
-
-                eval_compute_jac_f_a = jacrev(eval_dynamic_ode_func_wrapper, argnums=2)
-
-                def eval_compute_jac_for_single_s(s_single):
-                    s_batch = s_single.unsqueeze(0)
-                    a_zeros_single = torch.zeros(1, action_dim, device=s_single.device)
-                    jacobian_matrix = eval_compute_jac_f_a(
-                        torch.tensor(0.0), s_batch, a_zeros_single
-                    )
-                    if jacobian_matrix.dim() > 2:
-                        jacobian_matrix = jacobian_matrix.squeeze(0)
-                    if jacobian_matrix.dim() > 2:
-                        jacobian_matrix = jacobian_matrix.squeeze(0)
-                    return jacobian_matrix
-
-                def eval_get_f2_transpose(s_norm_batch):
-                    return torch.permute(
-                        vmap(eval_compute_jac_for_single_s)(s_norm_batch), (0, 2, 1)
-                    )
-
-                # <<< Add reward grad/hessian funcs for eval >>>
-                def eval_reward_model_wrapper(s, a):
-                    if s.dim() == 1:
-                        s = s.unsqueeze(0)
-                    if a.dim() == 1:
-                        a = a.unsqueeze(0)
-                    return eval_reward_model(s, a).squeeze()
-
-                eval_compute_reward_grad_func = grad(
-                    eval_reward_model_wrapper, argnums=1
-                )
-                eval_compute_reward_hessian_func = hessian(
-                    eval_reward_model_wrapper, argnums=1
-                )
-
-                # <<< Updated eval helper to accept bounds and clamp >>>
-                def eval_calculate_a_star_quad_approx(
-                    s_norm_batch,
-                    dVdx_norm,
-                    f2_transpose,
-                    action_space_low_t,
-                    action_space_high_t,
-                ):
-                    if f2_transpose is None:
-                        print("WARN: Eval f2_transpose is None.")
-                        return None
-                    # Need reward grad/hessian funcs defined above
-                    if (
-                        eval_compute_reward_grad_func is None
-                        or eval_compute_reward_hessian_func is None
-                    ):
-                        print("WARN: Eval reward grad/hessian func not available.")
-                        return None
-
-                    # Compute reward model gradients/hessians using eval models
-                    zero_actions = torch.zeros(
-                        s_norm_batch.shape[0], action_dim, device=device
-                    )
-                    try:
-                        c1 = -vmap(eval_compute_reward_grad_func)(
-                            s_norm_batch, zero_actions
-                        )
-                        c2 = -vmap(eval_compute_reward_hessian_func)(
-                            s_norm_batch, zero_actions
-                        )
-                    except Exception as e:
-                        print(f"WARN: Eval reward grad/hess failed: {e}")
-                        return None
-
-                    # Regularize Hessian and compute terms for quadratic approximation
-                    c2_reg = (
-                        c2 + torch.eye(action_dim, device=device) * args.hessian_reg
-                    )
-                    dVdx_col = dVdx_norm.unsqueeze(-1)
-                    # Calculate term H_a(0) = R_a(0) + V_s^T f2 = -c1 + dVdx^T f2
-                    f2T_dVdx = torch.bmm(f2_transpose, dVdx_col).squeeze(-1)
-                    term1 = -c1 + f2T_dVdx # Corrected sign for c1
-                    a_star_unclamped = None
-
-                    try:
-                        # Attempt to solve using torch.linalg.solve
-                        # Solve c2_reg * a* = term1
-                        a_star_unclamped = torch.linalg.solve(
-                            c2_reg, term1.unsqueeze(-1) # Removed negative sign
-                        ).squeeze(-1)
-                    except torch.linalg.LinAlgError:
-                        # Fallback to pseudo-inverse if solve fails
-                        print("WARN: Eval torch.linalg.solve failed, using pinv.")
-                        try:
-                            c2_reg_pinv = torch.linalg.pinv(c2_reg)
-                            # a* = c2_pinv * term1
-                            a_star_unclamped = torch.bmm(
-                                c2_reg_pinv, term1.unsqueeze(-1) # Removed negative sign
-                            ).squeeze(-1)
-                        except Exception as e_pinv:
-                            print(f"ERROR: Eval a* pinv also failed: {e_pinv}")
-                            return None
-                    except Exception as e_solve:
-                        # Catch other potential errors during solve
-                        print(f"ERROR: Eval a* solve encountered error: {e_solve}")
-                        return None
-
-                    # If calculation succeeded, clamp the action
-                    if a_star_unclamped is not None:
-                        return torch.clamp(
-                            a_star_unclamped, action_space_low_t, action_space_high_t
-                        )
-                    else:
-                        # This path indicates a failure even with pinv fallback
-                        print("ERROR: Eval a* calculation resulted in None after attempting solve and pinv.")
-                        return None
-
-            except Exception as e:
-                print(f"Eval grad/jac/hess func setup failed: {e}")
+             except Exception as e: print(f"Eval grad/jac func setup failed: {e}")
 
         for seed in eval_seeds:
-            eval_envs_base = DummyVecEnv(
-                [make_env(args.env_id, seed, False, f"{run_name}-eval-seed{seed}")]
-            )
-            eval_norm_envs = VecNormalize.load(norm_stats_path, eval_envs_base)
-            eval_norm_envs.training = False
-            eval_norm_envs.norm_reward = False
-            obs_norm_np = eval_norm_envs.reset(seed=seed)
-            done = False
-            episode_return_raw = 0
-            num_steps = 0
-            max_steps = 1000
-            while not done and num_steps < max_steps:
+            # <<< Norm Change: Use raw env for eval >>>
+            eval_env = DummyVecEnv([make_env(args.env_id,seed,False,f"{run_name}-eval-seed{seed}")])
+            obs_raw_np, _ = eval_env.reset(seed=seed); # Get raw obs
+            obs_raw_np = obs_raw_np.astype(np.float32)
+            done = False; episode_return_raw = 0; num_steps = 0; max_steps=1000
+            while not done and num_steps<max_steps:
                 with torch.no_grad():
-                    obs_tensor = torch.tensor(obs_norm_np, dtype=torch.float32).to(
-                        device
-                    )
-                    action = np.zeros((args.num_envs, action_dim))  # Default
-                    if (
-                        eval_compute_value_grad_func is not None
-                        and eval_get_f2_transpose is not None
-                        and eval_calculate_a_star_quad_approx is not None
-                    ):
-                        # Removed try...except block
-                        dVdx = vmap(eval_compute_value_grad_func)(obs_tensor)
-                        f2_T = eval_get_f2_transpose(obs_tensor)
-                        if f2_T is not None:
-                                # Calculate a* (now clamped inside the helper)
-                                action_star = eval_calculate_a_star_quad_approx(
-                                    obs_tensor,
-                                    dVdx,
-                                    f2_T,
-                                    action_space_low_t,
-                                    action_space_high_t,
-                                )
-                                if action_star is not None:
-                                    action = action_star.cpu().numpy()
-                                else:
-                                    # Fallback if a* calculation failed
-                                    print("WARN: Eval a* calculation returned None.")
-                                    action = np.array(
-                                        [
-                                            eval_norm_envs.action_space.sample()
-                                            for _ in range(eval_norm_envs.num_envs)
-                                        ]
-                                    )
-                        else: # Corrected indentation
-                            action = np.array(
-                                [
-                                    eval_norm_envs.action_space.sample()
-                                        for _ in range(eval_norm_envs.num_envs)
-                                    ]
-                                )
-                        # No except block here, errors will propagate
-                    else:
-                        # Fallback if HJB components not available for eval
-                        action = np.array(
-                            [
-                                    eval_norm_envs.action_space.sample()
-                                    for _ in range(eval_norm_envs.num_envs)
-                                ]
-                            )
+                    obs_tensor = torch.tensor(obs_raw_np, dtype=torch.float32).to(device) # Use raw obs tensor
+                    action = np.zeros((args.num_envs, action_dim)) # Default
+                    if eval_compute_value_grad_func is not None and eval_get_f2_transpose is not None and eval_calculate_a_star is not None:
+                        try:
+                            dVdx = vmap(eval_compute_value_grad_func)(obs_tensor) # Grad w.r.t raw obs
+                            f2_T = eval_get_f2_transpose(obs_tensor) # f2(s_raw)^T
+                            if f2_T is not None:
+                                action_star_unclamped = eval_calculate_a_star(dVdx, f2_T)
+                                if action_star_unclamped is not None:
+                                    # Clamp final action for environment step
+                                    action_star_clamped = torch.max(torch.min(action_star_unclamped, action_space_high_t), action_space_low_t)
+                                    action = action_star_clamped.cpu().numpy()
+                                else: action = np.array([eval_env.action_space.sample() for _ in range(eval_env.num_envs)])
+                            else: action = np.array([eval_env.action_space.sample() for _ in range(eval_env.num_envs)])
+                        except Exception as e: print(f"Eval action calc failed: {e}"); action = np.array([eval_env.action_space.sample() for _ in range(eval_env.num_envs)])
+                    else: action = np.array([eval_env.action_space.sample() for _ in range(eval_env.num_envs)])
 
-                obs_norm_np, reward_raw_step, term, trunc, info = eval_norm_envs.step(
-                    action
-                )
-                done = term[0] or trunc[0]
-                episode_return_raw += reward_raw_step[0]
-                num_steps += 1
-            eval_returns_raw.append(episode_return_raw)
-            print(
-                f"  Eval Seed {seed}: Raw Episodic Return={episode_return_raw:.2f} ({num_steps} steps)"
-            )
-            eval_envs_base.close()
-        mean_eval_return_raw = np.mean(eval_returns_raw)
-        std_eval_return_raw = np.std(eval_returns_raw)
-        print(
-            f"Evaluation complete. Avg Return: {mean_eval_return_raw:.2f} +/- {std_eval_return_raw:.2f}"
-        )
-        for idx, r in enumerate(eval_returns_raw):
-            writer.add_scalar("eval/raw_episodic_return", r, idx)
-        if args.upload_model:
-            print("Uploading models to Hugging Face Hub...")
-            # ... (HF Upload logic) ...
+                # <<< Norm Change: Step raw env >>>
+                obs_raw_np, reward_raw_step, term, trunc, info = eval_env.step(action) # Get raw obs, raw reward
+                obs_raw_np = obs_raw_np.astype(np.float32)
+                done = term[0] or trunc[0]; episode_return_raw += reward_raw_step[0]; num_steps += 1
+            eval_returns_raw.append(episode_return_raw);print(f"  Eval Seed {seed}: Raw Episodic Return={episode_return_raw:.2f} ({num_steps} steps)");eval_env.close()
+        mean_eval_return_raw=np.mean(eval_returns_raw);std_eval_return_raw=np.std(eval_returns_raw);print(f"Evaluation complete. Avg Return: {mean_eval_return_raw:.2f} +/- {std_eval_return_raw:.2f}");
+        for idx,r in enumerate(eval_returns_raw):writer.add_scalar("eval/raw_episodic_return",r,idx)
+        if args.upload_model:print("Uploading models to Hugging Face Hub...");# ... (HF Upload logic) ...
 
     # --- Cleanup ---
-    norm_envs.close()
-    writer.close()
-    print("\nTraining finished.")
+    norm_envs.close(); writer.close(); print("\nTraining finished.")
+

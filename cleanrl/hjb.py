@@ -118,8 +118,38 @@ class ODEFunc(nn.Module): # (Same)
     def forward(self, t, x_raw, a_raw): f1,f2=self.get_f1_f2(x_raw); control_effect=torch.bmm(f2,a_raw.float().unsqueeze(-1)).squeeze(-1); dx_dt=f1+control_effect; return dx_dt
 
 class DynamicModel(nn.Module): # (Same)
-    def __init__(self, obs_dim, action_dim, dt: float, device: torch.device): super().__init__(); self.ode_func = ODEFunc(obs_dim, action_dim); self.dt = dt; self.device = device; if not TORCHODE_AVAILABLE: raise ImportError("torchode not found."); self.term=to.ODETerm(self.ode_func,with_args=True); self.step_method=to.Euler(term=self.term); self.step_size_controller=to.FixedStepController(); self.adjoint=to.AutoDiffAdjoint(step_method=self.step_method, step_size_controller=self.step_size_controller); print(f"Initialized DynamicModel (RAW) using Control-Affine ODEFunc (Solver: Euler, dt={self.dt})")
-    def forward(self, initial_obs_raw, actions_raw): batch_size=initial_obs_raw.shape[0]; dt0=torch.full((batch_size,),self.dt/5,device=self.device); t_span_tensor=torch.tensor([0.0,self.dt],device=self.device); t_eval=t_span_tensor.unsqueeze(0).repeat(batch_size,1); problem=to.InitialValueProblem(y0=initial_obs_raw.float(),t_eval=t_eval,); t_eval_actual, sol_ys = to.odeint(self.ode_func, initial_obs_raw.float(), t_eval[0], solver=self.step_method, args=(actions_raw.float(),), dt0=dt0[0]); final_state_pred_raw=sol_ys[1]; return final_state_pred_raw
+    def __init__(self, obs_dim, action_dim, dt: float, device: torch.device):
+        super().__init__()
+        self.ode_func = ODEFunc(obs_dim, action_dim)
+        self.dt = dt
+        self.device = device
+        if not TORCHODE_AVAILABLE:
+            raise ImportError("torchode not found.")
+        self.term = to.ODETerm(self.ode_func, with_args=True)
+        self.step_method = to.Euler(term=self.term)
+        self.step_size_controller = to.FixedStepController()
+        # Adjoint is created but not used in the forward pass currently.
+        # self.adjoint = to.AutoDiffAdjoint(step_method=self.step_method, step_size_controller=self.step_size_controller)
+        print(f"Initialized DynamicModel (RAW) using Control-Affine ODEFunc (Solver: Euler, dt={self.dt})")
+
+    def forward(self, initial_obs_raw, actions_raw):
+        batch_size = initial_obs_raw.shape[0]
+        # Use a small fraction of dt for dt0, ensuring it's a scalar tensor
+        dt0 = torch.tensor(self.dt / 5.0, device=self.device) # Scalar dt0
+        t_span_tensor = torch.tensor([0.0, self.dt], device=self.device)
+        # t_eval should be [t_start, t_end] for each batch element if needed, but odeint takes a single t_span
+        # problem = to.InitialValueProblem(y0=initial_obs_raw.float(), t_eval=t_eval) # t_eval not directly used by odeint here
+        t_eval_actual, sol_ys = to.odeint(
+            self.ode_func,
+            initial_obs_raw.float(),
+            t_span_tensor, # Pass the [t_start, t_end] tensor directly
+            solver=self.step_method,
+            args=(actions_raw.float(),),
+            dt0=dt0 # Pass the scalar dt0
+        )
+        # sol_ys contains solutions at t_eval points, so sol_ys[1] is the state at t=self.dt
+        final_state_pred_raw = sol_ys[1]
+        return final_state_pred_raw
 
 # --- Agent Network Definitions ---
 # Operates on RAW observations

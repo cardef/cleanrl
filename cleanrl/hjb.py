@@ -588,14 +588,15 @@ if __name__ == "__main__":
         for info in final_infos:
             if info and "episode" in info:
                 episode_info = info["episode"]
+                # Use .item() to extract scalar value for printing and logging
                 print(
-                    f"GStep={global_step}, EpReturn={episode_info['r']:.2f}, EpLen={episode_info['l']}"
+                    f"GStep={global_step}, EpReturn={episode_info['r'].item():.2f}, EpLen={episode_info['l'].item()}"
                 )
                 writer.add_scalar(
-                    "charts/episodic_return", episode_info["r"], global_step
+                    "charts/episodic_return", episode_info["r"].item(), global_step
                 )
                 writer.add_scalar(
-                    "charts/episodic_length", episode_info["l"], global_step
+                    "charts/episodic_length", episode_info["l"].item(), global_step
                 )
                 break
 

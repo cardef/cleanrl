@@ -1328,12 +1328,13 @@ if __name__ == "__main__":
                     L_HJB = torch.tensor(0.0).to(device)
                     if args.use_hjb_loss and model_is_accurate and compute_value_grad_func is not None:
                         try:
-                            action_from_batch = mb_actions
-                            dVdx_norm = vmap(compute_value_grad_func)(mb_obs)
+                            # Use the mean action (mode) for HJB dynamics term
                             with torch.no_grad():
+                                action_mean_hjb = agent.actor_mean(mb_obs)
                                 f_norm = dynamic_model.ode_func(
-                                    0, mb_obs, action_from_batch
+                                    0, mb_obs, action_mean_hjb
                                 )
+                            dVdx_norm = vmap(compute_value_grad_func)(mb_obs)
                             r_norm_actual = mb_rewards_norm
                             hamiltonian = r_norm_actual.squeeze(-1) + torch.einsum(
                                 "bi,bi->b", dVdx_norm, f_norm

@@ -1334,8 +1334,9 @@ if __name__ == "__main__":
                                 f_norm = dynamic_model.ode_func(
                                     0, mb_obs, action_mean_hjb
                                 )
+                                # Use reward model prediction for the mean action
+                                r_norm_actual = reward_model(mb_obs, action_mean_hjb)
                             dVdx_norm = vmap(compute_value_grad_func)(mb_obs)
-                            r_norm_actual = mb_rewards_norm
                             hamiltonian = r_norm_actual.squeeze(-1) + torch.einsum(
                                 "bi,bi->b", dVdx_norm, f_norm
                             )

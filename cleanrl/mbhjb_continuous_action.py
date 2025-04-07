@@ -135,7 +135,7 @@ class Args:
     model_validation_freq: int = 1
 
     # HJB Residual Args
-    hjb_coef: float = 0.1
+    hjb_coef: float = 0.5
     use_hjb_loss: bool = True
 
     # Environment dt

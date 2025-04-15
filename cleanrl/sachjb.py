@@ -86,7 +86,7 @@ class Args:
     q_lr: float = 1e-3
     policy_frequency: int = 2
     grad_norm_clip: Optional[float] = 1.0
-    alpha: float = 0.2
+    alpha: float = 0.01
     autotune: bool = True
     model_train_freq: int = 1000
     model_dataset_size: int = 50_000
@@ -720,7 +720,7 @@ if __name__ == "__main__":
                             True,
                         )
                         print(
-                            f"  Dyn Epoch {epoch+1}: TrLs={train_loss:.5f}, ValLs={val_loss:.5f}, ValR2={val_metrics['r2']:.3f}"
+                            f"  Dyn Epoch {epoch+1}: TrLs={train_loss}, ValLs={val_loss}, ValR2={val_metrics['r2']}"
                         )
                         if val_loss < best_val_loss - args.model_val_delta:
                             best_val_loss = val_loss
@@ -933,6 +933,7 @@ if __name__ == "__main__":
             and dynamic_model_accurate
             and reward_model_accurate
             and rb.size() >= args.num_model_rollout_starts
+            and 1==0
         )
         if can_rollout:
             rollout_start_time = time.time()
@@ -1108,10 +1109,10 @@ if __name__ == "__main__":
                     with torch.no_grad():
                         f_actor = dynamic_model.ode_func(0, obs_for_actor, pi_actions)
                         r_actor = reward_model(obs_for_actor, pi_actions)
-                    hamiltonian_actor = r_actor + torch.einsum(
+                    hamiltonian_actor = -r_actor + torch.einsum(
                         "bi,bi->b", dVdx_actor, f_actor
                     )
-                    actor_loss = (alpha * log_pi.squeeze(-1) - hamiltonian_actor).mean()
+                    actor_loss = (alpha * log_pi.squeeze(-1) + hamiltonian_actor).mean()
                     policy_optimizer.zero_grad()
                     actor_loss.backward()
                     if args.grad_norm_clip is not None:

@@ -130,7 +130,7 @@ class Args:
 
     # Model Validation Args
     model_validation_batch_size: int = 1024
-    model_state_accuracy_threshold: float = 0.02
+    model_state_accuracy_threshold: float = 0.05
     model_early_stopping_patience: int = 50
     model_validation_freq: int = 1
 

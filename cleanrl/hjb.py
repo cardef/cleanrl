@@ -214,7 +214,7 @@ class DynamicModel(nn.Module):  # (Same)
         self.step_method = to.Euler(term=self.term)
         self.step_size_controller = to.FixedStepController()
         # Adjoint is created but not used in the forward pass currently.
-        # self.adjoint = to.AutoDiffAdjoint(step_method=self.step_method, step_size_controller=self.step_size_controller)
+        self.adjoint = to.AutoDiffAdjoint(step_method=self.step_method, step_size_controller=self.step_size_controller)
         print(
             f"Initialized DynamicModel (RAW) using Control-Affine ODEFunc (Solver: Euler, dt={self.dt})"
         )
@@ -224,19 +224,12 @@ class DynamicModel(nn.Module):  # (Same)
         # Use a small fraction of dt for dt0, ensuring it's a scalar tensor
         dt0 = torch.tensor(self.dt / 5.0, device=self.device)  # Scalar dt0
         t_span_tensor = torch.tensor([0.0, self.dt], device=self.device)
+        t_eval = t_span_tensor.unsqueeze(0).repeat(batch_size, 1)
         # t_eval should be [t_start, t_end] for each batch element if needed, but odeint takes a single t_span
-        # problem = to.InitialValueProblem(y0=initial_obs_raw.float(), t_eval=t_eval) # t_eval not directly used by odeint here
-        t_eval_actual, sol_ys = to.odeint(
-            self.ode_func,
-            initial_obs_raw.float(),
-            t_span_tensor,  # Pass the [t_start, t_end] tensor directly
-            solver=self.step_method,
-            args=(actions_raw.float(),),
-            dt0=dt0,  # Pass the scalar dt0
-        )
-        # sol_ys contains solutions at t_eval points, so sol_ys[1] is the state at t=self.dt
-        final_state_pred_raw = sol_ys[1]
-        return final_state_pred_raw
+        problem = to.InitialValueProblem(y0=initial_obs_raw.float(), t_eval=t_eval) # t_eval not directly used by odeint here
+        sol = self.adjoint.solve(problem, args=actions_raw.float(), dt0=dt0)
+        final_state_pred_norm = sol.ys[:, 1, :]
+        return final_state_pred_norm
 
 
 # --- Agent Network Definitions ---
